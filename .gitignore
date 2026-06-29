@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+# forward-looking (M1+) local SQLite scratch DBs
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+# Cargo.lock IS committed (ships the `note` binary). Do NOT ignore it.

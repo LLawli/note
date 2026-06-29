@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/note-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "Terminal note-taking (CLI + TUI) over a single SQLite file"
+
+[workspace.dependencies]
+note-core = { path = "crates/note-core", version = "0.1.0" }
+note-store = { path = "crates/note-store", version = "0.1.0" }
+note-md = { path = "crates/note-md", version = "0.1.0" }
+note-tui = { path = "crates/note-tui", version = "0.1.0" }
+note-cli = { path = "crates/note-cli", version = "0.1.0" }
+
+# default-features=false => no std/rand/getrandom => no ambient Ulid::new()/clock in core.
+# This blocks ambient ctors only while M0 is the sole ulid consumer; M1+ feature
+# unification can turn std on. The DURABLE guard is tests/io_free_guard.rs, not this flag.
+ulid = { version = "1.2", default-features = false }
+thiserror = { version = "2.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# pedantic de-noise for an early skeleton:
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+# pedantic de-noise for TEST code (fires under --all-targets -D warnings):
+unreadable_literal = "allow"
+similar_names = "allow"
+items_after_statements = "allow"
+cast_possible_truncation = "allow"
