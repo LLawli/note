@@ -163,6 +163,15 @@ impl<'a> App<'a> {
             self.selected = max;
         }
     }
+
+    /// Upper bound for the View-mode scroll offset: the body's line count, so
+    /// scrolling cannot run off into blank space past the note. Approximate
+    /// (ignores wrapping) but bounded, which is the point.
+    fn max_scroll(&self) -> u16 {
+        self.current().map_or(0, |n| {
+            u16::try_from(n.body.lines().count()).unwrap_or(u16::MAX)
+        })
+    }
 }
 
 impl Model for App<'_> {
@@ -190,7 +199,7 @@ impl Model for App<'_> {
                 _ => self.selected = self.selected.saturating_sub(1),
             },
             Msg::Down => match self.mode {
-                Mode::View => self.scroll = self.scroll.saturating_add(1),
+                Mode::View => self.scroll = (self.scroll + 1).min(self.max_scroll()),
                 _ => {
                     if self.selected + 1 < self.notes.len() {
                         self.selected += 1;
@@ -208,6 +217,7 @@ impl Model for App<'_> {
             Msg::StartSearch => {
                 self.mode = Mode::Search;
                 self.search.clear();
+                self.run_search(); // empty query -> show the full list, not stale results
             }
             Msg::SearchChar(c) => {
                 self.search.push(c);
@@ -426,6 +436,21 @@ mod tests {
         }
         assert_eq!(app.notes.len(), 1);
         assert_eq!(app.notes[0].display_title(), "mensagem");
+    }
+
+    #[test]
+    fn start_search_resets_to_full_list() {
+        let (store, _d) = store_with(&["alpha", "beta", "gamma"]);
+        let mut app = loaded(&store);
+        app.update(Msg::StartSearch);
+        for c in "alpha".chars() {
+            app.update(Msg::SearchChar(c));
+        }
+        assert_eq!(app.notes.len(), 1);
+        // re-opening search must clear the stale filtered list, not keep it
+        app.update(Msg::SearchCancel);
+        app.update(Msg::StartSearch);
+        assert_eq!(app.notes.len(), 3);
     }
 
     #[test]

@@ -14,9 +14,6 @@ use ratatui::backend::Backend;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui_tea::Program;
 use std::io;
-use std::time::Duration;
-
-const POLL: Duration = Duration::from_millis(250);
 
 /// Launch the interactive browser over `store`. Sets up the terminal (raw mode +
 /// alternate screen + panic-restoring hook), runs the event loop, and always
@@ -35,16 +32,22 @@ where
 {
     let mut program = Program::new(App::new(store));
     program.init();
+    program.draw(terminal).map_err(Into::into)?; // initial frame
 
+    // Event-driven redraw: only repaint after a handled key or a resize, so an
+    // idle TUI does no work (e.g. no re-parsing the viewed note's markdown).
     while program.model().is_running() {
-        program.draw(terminal).map_err(Into::into)?;
-
-        if event::poll(POLL)?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-            && let Some(msg) = program.model().map_key(key)
-        {
-            program.send(msg);
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if let Some(msg) = program.model().map_key(key) {
+                    program.send(msg);
+                    program.draw(terminal).map_err(Into::into)?;
+                }
+            }
+            Event::Resize(_, _) => {
+                program.draw(terminal).map_err(Into::into)?;
+            }
+            _ => {}
         }
     }
     Ok(program.model().outcome())
