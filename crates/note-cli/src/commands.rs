@@ -14,6 +14,7 @@ use note_core::{ContentKind, Note, NoteId, Tag};
 use note_store::{ImportNote, ImportOutcome, NewNote, NotePatch, Store};
 use std::collections::BTreeSet;
 use std::io::{IsTerminal, Read, Write};
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -65,18 +66,25 @@ fn cmd_import(store: &Store, args: &ImportArgs) -> Result<ExitCode> {
 
     // Second pass: re-resolve links now that every imported note exists, so
     // forward references between files in the batch are no longer left dangling
-    // (first-pass resolution can't see notes imported later).
-    for (id, links) in imported {
-        store
-            .writer()
-            .replace_links(id, links)
-            .context("resolving imported links")?;
+    // (first-pass resolution can't see notes imported later). A single-file batch
+    // has no later file to reference, so its first pass is already final; and a
+    // linkless note has nothing to re-resolve.
+    if imported.len() > 1 {
+        for (id, links) in imported {
+            if links.is_empty() {
+                continue;
+            }
+            store
+                .writer()
+                .replace_links(id, links)
+                .context("resolving imported links")?;
+        }
     }
 
     if args.json {
         let report =
             serde_json::json!({ "created": created, "updated": updated, "failed": failed });
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        println!("{}", to_json(&report)?);
     } else {
         eprintln!("imported {created} new, {updated} updated, {failed} failed");
     }
@@ -127,16 +135,13 @@ fn import_one(
         }
     };
 
-    // Normalize the title (trim, empty -> None) like cmd_new, so an explicit
-    // empty-string title can't slip a junk note past the empty-note guard.
-    req.title = req
-        .title
-        .map(|t| t.trim().to_owned())
-        .filter(|t| !t.is_empty());
+    // Normalize the title (trim, empty -> None) so an explicit empty-string title
+    // can't slip a junk note past the empty-note guard.
+    req.title = normalize_title(req.title);
 
     // Mirror cmd_new/edit: don't import junk empties (id-less markdown would also
     // mint a fresh id on every re-import, accumulating duplicates).
-    if req.body.trim().is_empty() && req.title.is_none() {
+    if is_empty_note(&req.body, req.title.as_deref()) {
         bail!("refusing to import an empty note: {}", path.display());
     }
 
@@ -205,7 +210,7 @@ fn edit_note_in_editor(store: &Store, config: &Config, id: NoteId) -> Result<()>
     let Some(fresh) = store.readers().get_note(id)? else {
         return Ok(());
     };
-    if body.is_empty() && fresh.title.is_none() {
+    if is_empty_note(&body, fresh.title.as_deref()) {
         eprintln!("edit cancelled: refusing to leave an empty note");
         return Ok(());
     }
@@ -224,12 +229,9 @@ fn cmd_new(store: &Store, config: &Config, args: NewArgs) -> Result<ExitCode> {
     let tags = parse_tags(&args.tags)?;
     let body = resolve_body(&args, config)?;
     let body = body.trim_end().to_owned();
-    let title = args
-        .title
-        .map(|t| t.trim().to_owned())
-        .filter(|t| !t.is_empty());
+    let title = normalize_title(args.title);
 
-    if body.is_empty() && title.is_none() {
+    if is_empty_note(&body, title.as_deref()) {
         bail!("refusing to create an empty note (give a title, --message, or a body)");
     }
 
@@ -260,10 +262,9 @@ fn cmd_new(store: &Store, config: &Config, args: NewArgs) -> Result<ExitCode> {
 }
 
 fn cmd_delete(store: &Store, config: &Config, args: &DeleteArgs) -> Result<ExitCode> {
-    let note = match resolve_required(store, config, &args.reference)? {
-        Resolved::Found(note) => *note,
-        Resolved::Aborted => return Ok(ExitCode::SUCCESS),
-        Resolved::Ambiguous => return Ok(ExitCode::FAILURE),
+    let note = match resolve_required(store, config, &args.reference)?.into_flow() {
+        ControlFlow::Continue(note) => note,
+        ControlFlow::Break(code) => return Ok(code),
     };
 
     if !args.yes && !confirm_delete(&note)? {
@@ -298,16 +299,9 @@ fn confirm_delete(note: &Note) -> Result<bool> {
 }
 
 fn cmd_show(store: &Store, config: &Config, args: &ShowArgs) -> Result<ExitCode> {
-    let note = match &args.reference {
-        None => match store.readers().most_recent()? {
-            Some(note) => note,
-            None => bail!("no notes yet"),
-        },
-        Some(reference) => match resolve_required(store, config, reference)? {
-            Resolved::Found(note) => *note,
-            Resolved::Aborted => return Ok(ExitCode::SUCCESS),
-            Resolved::Ambiguous => return Ok(ExitCode::FAILURE),
-        },
+    let note = match resolve_or_recent(store, config, args.reference.as_deref())? {
+        ControlFlow::Continue(note) => note,
+        ControlFlow::Break(code) => return Ok(code),
     };
 
     if args.json {
@@ -319,13 +313,9 @@ fn cmd_show(store: &Store, config: &Config, args: &ShowArgs) -> Result<ExitCode>
 }
 
 fn cmd_edit(store: &Store, config: &Config, args: EditArgs) -> Result<ExitCode> {
-    let current = match &args.reference {
-        None => store.readers().most_recent()?.context("no notes yet")?,
-        Some(reference) => match resolve_required(store, config, reference)? {
-            Resolved::Found(note) => *note,
-            Resolved::Aborted => return Ok(ExitCode::SUCCESS),
-            Resolved::Ambiguous => return Ok(ExitCode::FAILURE),
-        },
+    let current = match resolve_or_recent(store, config, args.reference.as_deref())? {
+        ControlFlow::Continue(note) => note,
+        ControlFlow::Break(code) => return Ok(code),
     };
 
     let metadata_only =
@@ -345,10 +335,7 @@ fn cmd_edit(store: &Store, config: &Config, args: EditArgs) -> Result<ExitCode> 
     let body = body.trim_end().to_owned();
 
     let title = match args.title {
-        Some(t) => {
-            let t = t.trim().to_owned();
-            if t.is_empty() { None } else { Some(t) }
-        }
+        Some(t) => normalize_title(Some(t)),
         None => current.title.clone(),
     };
 
@@ -366,7 +353,7 @@ fn cmd_edit(store: &Store, config: &Config, args: EditArgs) -> Result<ExitCode> 
         parse_tags(&args.tags)?
     };
 
-    if body.is_empty() && title.is_none() {
+    if is_empty_note(&body, title.as_deref()) {
         bail!("refusing to leave an empty note (give a title, --message, or a body)");
     }
 
@@ -395,13 +382,9 @@ fn cmd_edit(store: &Store, config: &Config, args: EditArgs) -> Result<ExitCode> 
 }
 
 fn cmd_links(store: &Store, config: &Config, args: &LinksArgs) -> Result<ExitCode> {
-    let note = match &args.reference {
-        None => store.readers().most_recent()?.context("no notes yet")?,
-        Some(reference) => match resolve_required(store, config, reference)? {
-            Resolved::Found(note) => *note,
-            Resolved::Aborted => return Ok(ExitCode::SUCCESS),
-            Resolved::Ambiguous => return Ok(ExitCode::FAILURE),
-        },
+    let note = match resolve_or_recent(store, config, args.reference.as_deref())? {
+        ControlFlow::Continue(note) => note,
+        ControlFlow::Break(code) => return Ok(code),
     };
     let links = store.readers().links_for(note.id)?;
 
@@ -416,20 +399,15 @@ fn cmd_links(store: &Store, config: &Config, args: &LinksArgs) -> Result<ExitCod
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&arr)?);
+        println!("{}", to_json(&arr)?);
     } else if links.is_empty() {
         eprintln!("no links");
     } else {
         for link in &links {
-            let target = match &link.display {
-                Some(d) => format!("[[{}|{d}]]", link.target),
-                None => format!("[[{}]]", link.target),
-            };
-            let status = link.resolved.map_or_else(
-                || "(dangling)".to_owned(),
-                |id| id.to_string().chars().take(10).collect(),
-            );
-            println!("{target}  ->  {status}");
+            let status = link
+                .resolved
+                .map_or_else(|| "(dangling)".to_owned(), short_id);
+            println!("[[{link}]]  ->  {status}");
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -472,7 +450,7 @@ fn cmd_tags(store: &Store, args: &TagsArgs) -> Result<ExitCode> {
             .iter()
             .map(|(tag, count)| serde_json::json!({ "tag": tag.as_str(), "count": count }))
             .collect();
-        println!("{}", serde_json::to_string_pretty(&arr)?);
+        println!("{}", to_json(&arr)?);
     } else if tags.is_empty() {
         eprintln!("no tags yet");
     } else {
@@ -484,13 +462,9 @@ fn cmd_tags(store: &Store, args: &TagsArgs) -> Result<ExitCode> {
 }
 
 fn cmd_tag(store: &Store, config: &Config, args: &TagArgs) -> Result<ExitCode> {
-    let current = match &args.reference {
-        None => store.readers().most_recent()?.context("no notes yet")?,
-        Some(reference) => match resolve_required(store, config, reference)? {
-            Resolved::Found(note) => *note,
-            Resolved::Aborted => return Ok(ExitCode::SUCCESS),
-            Resolved::Ambiguous => return Ok(ExitCode::FAILURE),
-        },
+    let current = match resolve_or_recent(store, config, args.reference.as_deref())? {
+        ControlFlow::Continue(note) => note,
+        ControlFlow::Break(code) => return Ok(code),
     };
 
     let note = if args.add.is_empty() && args.remove.is_empty() {
@@ -498,7 +472,7 @@ fn cmd_tag(store: &Store, config: &Config, args: &TagArgs) -> Result<ExitCode> {
     } else {
         let add = parse_tags(&args.add)?;
         let remove = parse_tags(&args.remove)?;
-        let mut tags = current.tags.clone();
+        let mut tags = current.tags;
         tags.extend(add);
         tags.retain(|t| !remove.contains(t));
         store
@@ -506,13 +480,13 @@ fn cmd_tag(store: &Store, config: &Config, args: &TagArgs) -> Result<ExitCode> {
             .update_note(
                 current.id,
                 NotePatch {
-                    title: current.title.clone(),
+                    title: current.title,
                     content_kind: current.content_kind,
                     tags,
                     // body is unchanged; carry its links so update doesn't clear
                     // the note's outgoing link graph.
                     links: note_md::extract_wikilinks(&current.body),
-                    body: current.body.clone(),
+                    body: current.body,
                 },
             )
             .context("updating tags")?
@@ -521,7 +495,7 @@ fn cmd_tag(store: &Store, config: &Config, args: &TagArgs) -> Result<ExitCode> {
 
     if args.json {
         let tags: Vec<&str> = note.tags.iter().map(Tag::as_str).collect();
-        println!("{}", serde_json::to_string_pretty(&tags)?);
+        println!("{}", to_json(&tags)?);
     } else if note.tags.is_empty() {
         eprintln!("(no tags)");
     } else {
@@ -540,7 +514,7 @@ fn cmd_status(store: &Store, config: &Config, args: &StatusArgs) -> Result<ExitC
             "data_dir": config.data_dir,
             "database": config.db_path(),
         });
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        println!("{}", to_json(&report)?);
     } else {
         println!("notes:    {count}");
         println!("data dir: {}", config.data_dir.display());
@@ -557,6 +531,18 @@ enum Resolved {
     Ambiguous,
     /// The user deliberately aborted the interactive picker: a clean no-op.
     Aborted,
+}
+
+impl Resolved {
+    /// Collapse a resolution outcome into either the note to act on or the exit
+    /// code to return — the one place the ambiguity/abort exit-code policy lives.
+    fn into_flow(self) -> ControlFlow<ExitCode, Note> {
+        match self {
+            Resolved::Found(note) => ControlFlow::Continue(*note),
+            Resolved::Aborted => ControlFlow::Break(ExitCode::SUCCESS),
+            Resolved::Ambiguous => ControlFlow::Break(ExitCode::FAILURE),
+        }
+    }
 }
 
 /// Resolve an ambiguous match to one note via the fzf picker (on a TTY) or a
@@ -585,6 +571,21 @@ fn resolve_required(store: &Store, config: &Config, reference: &str) -> Result<R
     }
 }
 
+/// Resolve an optional reference to one note: the explicit reference, or the
+/// most-recently-updated note when none is given. Returns the control flow the
+/// caller applies — the note to act on, or the exit code to return.
+fn resolve_or_recent(
+    store: &Store,
+    config: &Config,
+    reference: Option<&str>,
+) -> Result<ControlFlow<ExitCode, Note>> {
+    let Some(reference) = reference else {
+        let note = store.readers().most_recent()?.context("no notes yet")?;
+        return Ok(ControlFlow::Continue(note));
+    };
+    Ok(resolve_required(store, config, reference)?.into_flow())
+}
+
 fn resolve_body(args: &NewArgs, config: &Config) -> Result<String> {
     if let Some(message) = &args.message {
         return Ok(message.clone());
@@ -609,9 +610,19 @@ fn parse_tags(raw: &[String]) -> Result<BTreeSet<Tag>> {
         .collect()
 }
 
+/// Normalize a user-supplied title: trim, treating empty-after-trim as absent.
+fn normalize_title(title: Option<String>) -> Option<String> {
+    title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty())
+}
+
+/// A note with no body and no title is junk we refuse to create / import / leave.
+fn is_empty_note(body: &str, title: Option<&str>) -> bool {
+    body.trim().is_empty() && title.is_none()
+}
+
 fn print_list(notes: &[Note]) {
     for note in notes {
-        println!("{}  {}", short_id(note), note.display_title());
+        println!("{}  {}", short_id(note.id), note.display_title());
     }
 }
 
@@ -621,15 +632,16 @@ fn print_numbered(candidates: &[Note]) {
         eprintln!(
             "  {:>2}. {}  {}",
             i + 1,
-            short_id(note),
+            short_id(note.id),
             note.display_title()
         );
     }
     eprintln!("refine the reference, use a longer id prefix, or pick one above.");
 }
 
-fn short_id(note: &Note) -> String {
-    note.id.to_string().chars().take(10).collect()
+/// The git-style short id: the first 10 chars of the canonical ULID.
+fn short_id(id: NoteId) -> String {
+    id.to_string().chars().take(10).collect()
 }
 
 fn to_json<T: serde::Serialize>(value: &T) -> Result<String> {
