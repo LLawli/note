@@ -38,9 +38,10 @@ enum WriteCmd {
     },
 }
 
-/// Sync handle to the writer thread. Cloneable; every clone targets the same
-/// single writer.
-#[derive(Debug, Clone)]
+/// Sync handle to the writer thread. Intentionally NOT `Clone`: the store holds
+/// the single command sender, so `Store::drop` dropping it always ends the writer
+/// loop and lets the join complete (a surviving clone would block join forever).
+#[derive(Debug)]
 pub struct WriterHandle {
     tx: Sender<WriteCmd>,
 }

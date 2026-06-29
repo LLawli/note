@@ -4,7 +4,7 @@
 use crate::error::{Result, StoreError};
 use crate::model::{self, Link};
 use note_core::{Note, NoteId, Tag, WikiTarget};
-use rusqlite::{Connection, OpenFlags, params, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use std::collections::{BTreeSet, HashMap};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -99,7 +99,7 @@ impl ReaderPool {
                     [],
                     |r| r.get(0),
                 )
-                .ok();
+                .optional()?; // only no-rows -> None; real errors propagate
             match id {
                 Some(id) => load_note(conn, &id),
                 None => Ok(None),
@@ -230,26 +230,14 @@ impl ReaderPool {
                 return self.with(|conn| load_all(conn, &hits));
             }
         }
-        // 3 + 4. exact effective-title match (via the shared `title_matches`) wins;
-        // else fall back to the ranked FTS candidates. Both run on one pooled
-        // connection so reader-side resolution stays identical to the writer's
-        // link resolution (`resolve_title_to_id` builds on the same helper).
+        // 3 + 4. exact effective-title match wins; else fall back to the same
+        // (already-fetched) ranked FTS candidates. One scan, shared with the
+        // writer's link resolution via `title_candidates` (no double-scan, no
+        // divergence).
         self.with(|conn| {
-            let exact = title_matches(conn, r)?;
-            if !exact.is_empty() {
-                let ids: Vec<String> = exact.iter().map(NoteId::to_string).collect();
-                return load_all(conn, &ids);
-            }
-            let ids = {
-                let mut stmt = conn.prepare(
-                    "SELECT n.id FROM notes_fts f
-                     JOIN notes n ON n.rowid = f.rowid
-                     WHERE notes_fts MATCH ?1
-                     ORDER BY rank
-                     LIMIT 50",
-                )?;
-                collect_ids(stmt.query(params![quote_fts(r)])?)?
-            };
+            let (exact, all) = title_candidates(conn, r)?;
+            let chosen = if exact.is_empty() { all } else { exact };
+            let ids: Vec<String> = chosen.iter().map(NoteId::to_string).collect();
             load_all(conn, &ids)
         })
     }
@@ -294,23 +282,23 @@ fn clamp_i64(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
-/// Ids of notes whose effective title exactly equals `title` (case-insensitive),
-/// using FTS to generate the candidate set (no full scan). The single source of
-/// truth for title matching, shared by `resolve_ref` (reader/pool) and
-/// `resolve_title_to_id` (writer transaction); both pass a `&Connection` so they
-/// stay in lockstep.
-fn title_matches(conn: &Connection, title: &str) -> Result<Vec<NoteId>> {
-    let title = title.trim();
-    let needle = title.to_lowercase();
+/// FTS candidates for `title`, rank-ordered, split into `(exact, all)`: `exact`
+/// are notes whose effective title equals `title` case-insensitively; `all` is
+/// the full rank-ordered candidate set. One scan, the single source of truth for
+/// title matching, shared by `resolve_ref` (reader/pool) and `resolve_title_to_id`
+/// (writer transaction) so they never diverge or double-scan. `ORDER BY rank`
+/// keeps a unique exact-title note from being truncated out by the `LIMIT`.
+fn title_candidates(conn: &Connection, title: &str) -> Result<(Vec<NoteId>, Vec<NoteId>)> {
+    let needle = title.trim().to_lowercase();
     if needle.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let mut stmt = conn.prepare(
         "SELECT n.id, n.title, n.body, n.content_kind FROM notes_fts f
          JOIN notes n ON n.rowid = f.rowid
-         WHERE notes_fts MATCH ?1 LIMIT 50",
+         WHERE notes_fts MATCH ?1 ORDER BY rank LIMIT 50",
     )?;
-    let rows = stmt.query_map(params![quote_fts(title)], |row| {
+    let rows = stmt.query_map(params![quote_fts(title.trim())], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
@@ -319,19 +307,22 @@ fn title_matches(conn: &Connection, title: &str) -> Result<Vec<NoteId>> {
         ))
     })?;
 
-    let mut ids = Vec::new();
+    let mut all = Vec::new();
+    let mut exact = Vec::new();
     for row in rows {
         let (id, title_col, body, kind) = row?;
+        let nid = model::parse_id(&id)?;
         let effective = note_core::derive_title(
             title_col.as_deref(),
             &body,
             model::content_kind_from_db(&kind),
         );
         if effective.to_lowercase() == needle {
-            ids.push(model::parse_id(&id)?);
+            exact.push(nid);
         }
+        all.push(nid);
     }
-    Ok(ids)
+    Ok((exact, all))
 }
 
 /// Resolve a wikilink title to a unique `NoteId` (case-insensitive). Returns
@@ -339,8 +330,12 @@ fn title_matches(conn: &Connection, title: &str) -> Result<Vec<NoteId>> {
 /// stays dangling rather than resolving arbitrarily). Shared by the writer,
 /// which passes its transaction (coerced to `&Connection`).
 pub(crate) fn resolve_title_to_id(conn: &Connection, title: &str) -> Result<Option<NoteId>> {
-    let ids = title_matches(conn, title)?;
-    Ok(if ids.len() == 1 { Some(ids[0]) } else { None })
+    let (exact, _all) = title_candidates(conn, title)?;
+    Ok(if exact.len() == 1 {
+        Some(exact[0])
+    } else {
+        None
+    })
 }
 
 /// Does `s` look like a git-style ULID prefix? (1..26 Crockford base32 chars.)
@@ -396,6 +391,9 @@ fn load_all(conn: &Connection, ids: &[String]) -> Result<Vec<Note>> {
 }
 
 fn load_chunk(conn: &Connection, ids: &[String], out: &mut HashMap<String, Note>) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(()); // `IN ()` is invalid SQL; nothing to load
+    }
     let placeholders = vec!["?"; ids.len()].join(",");
 
     let notes_sql = format!(
