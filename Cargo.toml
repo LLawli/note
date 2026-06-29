@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/note-core",
   "crates/note-store",
+  "crates/note-md",
 ]
 
 [workspace.package]
