@@ -15,11 +15,17 @@ use std::ops::Range;
 /// ranges that fall inside code.
 #[must_use]
 pub fn extract_wikilinks(body: &str) -> Vec<WikiLink> {
+    // Cheap substring scan first: a body with no `[[…]]` span (the common case on
+    // most writes) skips the full pulldown-cmark parse that code_ranges runs.
+    let spans = scan_double_brackets(body);
+    if spans.is_empty() {
+        return Vec::new();
+    }
     let code = code_ranges(body);
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    for (open, inner) in scan_double_brackets(body) {
+    for (open, inner) in spans {
         if code.iter().any(|r| r.contains(&open)) {
             continue;
         }

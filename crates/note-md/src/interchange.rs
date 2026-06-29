@@ -106,12 +106,7 @@ pub fn from_markdown(text: &str) -> Result<ImportedNote, MdError> {
                     note.tags.insert(Tag::new(tag)?);
                 }
             }
-            "content_kind" => {
-                note.content_kind = match value {
-                    "plain" => ContentKind::Plain,
-                    _ => ContentKind::Markdown,
-                };
-            }
+            "content_kind" => note.content_kind = ContentKind::from_wire(value),
             "created" => note.created = Some(parse_ts(value, "created")?),
             "updated" => note.updated = Some(parse_ts(value, "updated")?),
             _ => {} // ignore unknown keys
@@ -140,20 +135,21 @@ fn parse_ts(value: &str, field: &str) -> Result<Timestamp, MdError> {
 /// Split leading `---\n … \n---\n` frontmatter from the body. Returns
 /// `(None, full_text)` when there is no complete frontmatter block.
 fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
-    if let Some(rest) = text.strip_prefix("---\n") {
-        // Empty frontmatter block: "---\n---\n<body>" or a bare "---\n---".
-        if let Some(body) = rest.strip_prefix("---\n") {
-            return (Some(""), body);
-        }
-        if rest == "---" {
-            return (Some(""), "");
-        }
-        if let Some(end) = rest.find("\n---\n") {
-            return (Some(&rest[..end]), &rest[end + 5..]);
-        }
-        if let Some(stripped) = rest.strip_suffix("\n---") {
-            return (Some(stripped), "");
-        }
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return (None, text);
+    };
+    // Empty frontmatter block: "---\n---\n<body>" or a bare "---\n---".
+    if let Some(body) = rest.strip_prefix("---\n") {
+        return (Some(""), body);
+    }
+    if rest == "---" {
+        return (Some(""), "");
+    }
+    if let Some(end) = rest.find("\n---\n") {
+        return (Some(&rest[..end]), &rest[end + 5..]);
+    }
+    if let Some(stripped) = rest.strip_suffix("\n---") {
+        return (Some(stripped), "");
     }
     (None, text)
 }
