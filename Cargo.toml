@@ -4,6 +4,7 @@ members = [
   "crates/note-core",
   "crates/note-store",
   "crates/note-md",
+  "crates/note-tui",
 ]
 
 [workspace.package]
