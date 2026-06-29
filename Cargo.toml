@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
   "crates/note-core",
+  "crates/note-store",
 ]
 
 [workspace.package]

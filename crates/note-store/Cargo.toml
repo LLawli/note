@@ -1,0 +1,22 @@
+[package]
+name = "note-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SQLite storage, single-writer actor, FTS5 and migrations for note"
+
+[dependencies]
+note-core = { workspace = true }
+rusqlite = { version = "0.37", features = ["bundled"] }
+refinery = { version = "0.9", features = ["rusqlite"] }
+thiserror = { workspace = true }
+# This is an edge crate: it MINTS ids (Ulid::new) and reads the wall clock,
+# so it enables ulid's std feature (disabled at the workspace default for core).
+ulid = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
