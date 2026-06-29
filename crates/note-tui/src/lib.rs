@@ -37,17 +37,21 @@ where
     // Event-driven redraw: only repaint after a handled key or a resize, so an
     // idle TUI does no work (e.g. no re-parsing the viewed note's markdown).
     while program.model().is_running() {
-        match event::read()? {
+        let redraw = match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if let Some(msg) = program.model().map_key(key) {
-                    program.send(msg);
-                    program.draw(terminal).map_err(Into::into)?;
+                match program.model().map_key(key) {
+                    Some(msg) => {
+                        program.send(msg);
+                        true
+                    }
+                    None => false,
                 }
             }
-            Event::Resize(_, _) => {
-                program.draw(terminal).map_err(Into::into)?;
-            }
-            _ => {}
+            Event::Resize(_, _) => true,
+            _ => false,
+        };
+        if redraw {
+            program.draw(terminal).map_err(Into::into)?;
         }
     }
     Ok(program.model().outcome())

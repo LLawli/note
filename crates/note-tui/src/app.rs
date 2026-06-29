@@ -164,6 +164,13 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Move the list cursor down one, staying within bounds via the single
+    /// selection-clamp (so the upper bound lives in exactly one place).
+    fn select_next(&mut self) {
+        self.selected += 1;
+        self.clamp_selection();
+    }
+
     /// Upper bound for the View-mode scroll offset: the body's line count, so
     /// scrolling cannot run off into blank space past the note. Approximate
     /// (ignores wrapping) but bounded, which is the point.
@@ -200,11 +207,7 @@ impl Model for App<'_> {
             },
             Msg::Down => match self.mode {
                 Mode::View => self.scroll = (self.scroll + 1).min(self.max_scroll()),
-                _ => {
-                    if self.selected + 1 < self.notes.len() {
-                        self.selected += 1;
-                    }
-                }
+                _ => self.select_next(),
             },
             Msg::Open => {
                 if self.mode == Mode::List && !self.notes.is_empty() {
