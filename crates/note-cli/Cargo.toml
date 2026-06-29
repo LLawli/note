@@ -1,0 +1,33 @@
+[package]
+name = "note-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The `note` binary: clap CLI front-end (launches the TUI when run bare)"
+
+[[bin]]
+name = "note"
+path = "src/main.rs"
+
+# NOTE: note-cli MUST NOT depend on note-tui (CLI is fully standalone).
+[dependencies]
+note-core = { workspace = true }
+note-store = { workspace = true }
+note-md = { workspace = true }
+note-tui = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+termimad = "0.34"
+figment = { version = "0.10", features = ["env", "toml"] }
+directories = "6"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = "3"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
+[lints]
+workspace = true
