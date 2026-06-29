@@ -467,6 +467,40 @@ fn export_then_import_roundtrips_across_databases() {
 }
 
 #[test]
+fn import_resolves_forward_links_regardless_of_order() {
+    let src = TempDir::new().unwrap();
+    let dst = TempDir::new().unwrap();
+    let export = TempDir::new().unwrap();
+
+    let target = create(&src, "Target", "# Target\nbody", &[]);
+    let source = create(&src, "Source", "see [[Target]]", &[]);
+    note(&src)
+        .args(["export", export.path().to_str().unwrap()])
+        .assert()
+        .success();
+
+    // import the SOURCE file BEFORE the TARGET file: first-pass resolution can't
+    // see Target yet, so only the second pass makes the link resolve.
+    let file = |id: &str| {
+        export
+            .path()
+            .join(format!("{id}.md"))
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    note(&dst)
+        .args(["import", &file(&source), &file(&target)])
+        .assert()
+        .success();
+    note(&dst)
+        .args(["links", "Source", "--json"])
+        .assert()
+        .success()
+        .stdout(contains(&target));
+}
+
+#[test]
 fn import_is_idempotent_on_reimport() {
     let src = TempDir::new().unwrap();
     let export = TempDir::new().unwrap();

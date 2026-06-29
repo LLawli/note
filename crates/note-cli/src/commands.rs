@@ -46,15 +46,31 @@ pub fn dispatch(cli: Cli) -> Result<ExitCode> {
 
 fn cmd_import(store: &Store, args: &ImportArgs) -> Result<ExitCode> {
     let (mut created, mut updated, mut failed) = (0u32, 0u32, 0u32);
+    let mut imported: Vec<(NoteId, Vec<note_core::WikiLink>)> = Vec::new();
     for path in &args.paths {
         match import_one(store, path) {
-            Ok(ImportOutcome::Created) => created += 1,
-            Ok(ImportOutcome::Updated) => updated += 1,
+            Ok((outcome, id, links)) => {
+                match outcome {
+                    ImportOutcome::Created => created += 1,
+                    ImportOutcome::Updated => updated += 1,
+                }
+                imported.push((id, links));
+            }
             Err(err) => {
                 failed += 1;
                 eprintln!("skip {}: {err:#}", path.display());
             }
         }
+    }
+
+    // Second pass: re-resolve links now that every imported note exists, so
+    // forward references between files in the batch are no longer left dangling
+    // (first-pass resolution can't see notes imported later).
+    for (id, links) in imported {
+        store
+            .writer()
+            .replace_links(id, links)
+            .context("resolving imported links")?;
     }
 
     if args.json {
@@ -71,16 +87,21 @@ fn cmd_import(store: &Store, args: &ImportArgs) -> Result<ExitCode> {
     })
 }
 
-/// Import a single file (atomic via the store's per-note transaction) and sync
-/// its link graph. Idempotent: a file carrying a known id updates in place.
-fn import_one(store: &Store, path: &Path) -> Result<ImportOutcome> {
+/// Import a single file (atomic via the store's per-note transaction).
+/// Idempotent: a file carrying a known id updates in place. Returns the note id
+/// and its extracted links so the caller can re-resolve them after the whole
+/// batch is in (forward references can't resolve on the first pass).
+fn import_one(
+    store: &Store,
+    path: &Path,
+) -> Result<(ImportOutcome, NoteId, Vec<note_core::WikiLink>)> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let is_json = path
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("json"));
 
-    let req = if is_json {
+    let mut req = if is_json {
         let note = note_md::from_json(&text)?;
         ImportNote {
             id: Some(note.id),
@@ -106,14 +127,22 @@ fn import_one(store: &Store, path: &Path) -> Result<ImportOutcome> {
         }
     };
 
+    // Normalize the title (trim, empty -> None) like cmd_new, so an explicit
+    // empty-string title can't slip a junk note past the empty-note guard.
+    req.title = req
+        .title
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty());
+
     // Mirror cmd_new/edit: don't import junk empties (id-less markdown would also
     // mint a fresh id on every re-import, accumulating duplicates).
     if req.body.trim().is_empty() && req.title.is_none() {
         bail!("refusing to import an empty note: {}", path.display());
     }
 
-    let (_note, outcome) = store.writer().import_note(req)?;
-    Ok(outcome)
+    let links = req.links.clone();
+    let (note, outcome) = store.writer().import_note(req)?;
+    Ok((outcome, note.id, links))
 }
 
 fn cmd_export(store: &Store, args: &ExportArgs) -> Result<ExitCode> {
@@ -231,8 +260,10 @@ fn cmd_new(store: &Store, config: &Config, args: NewArgs) -> Result<ExitCode> {
 }
 
 fn cmd_delete(store: &Store, config: &Config, args: &DeleteArgs) -> Result<ExitCode> {
-    let Some(note) = resolve_required(store, config, &args.reference)? else {
-        return Ok(ExitCode::FAILURE);
+    let note = match resolve_required(store, config, &args.reference)? {
+        Resolved::Found(note) => *note,
+        Resolved::Aborted => return Ok(ExitCode::SUCCESS),
+        Resolved::Ambiguous => return Ok(ExitCode::FAILURE),
     };
 
     if !args.yes && !confirm_delete(&note)? {
@@ -273,8 +304,9 @@ fn cmd_show(store: &Store, config: &Config, args: &ShowArgs) -> Result<ExitCode>
             None => bail!("no notes yet"),
         },
         Some(reference) => match resolve_required(store, config, reference)? {
-            Some(note) => note,
-            None => return Ok(ExitCode::FAILURE),
+            Resolved::Found(note) => *note,
+            Resolved::Aborted => return Ok(ExitCode::SUCCESS),
+            Resolved::Ambiguous => return Ok(ExitCode::FAILURE),
         },
     };
 
@@ -290,8 +322,9 @@ fn cmd_edit(store: &Store, config: &Config, args: EditArgs) -> Result<ExitCode> 
     let current = match &args.reference {
         None => store.readers().most_recent()?.context("no notes yet")?,
         Some(reference) => match resolve_required(store, config, reference)? {
-            Some(note) => note,
-            None => return Ok(ExitCode::FAILURE),
+            Resolved::Found(note) => *note,
+            Resolved::Aborted => return Ok(ExitCode::SUCCESS),
+            Resolved::Ambiguous => return Ok(ExitCode::FAILURE),
         },
     };
 
@@ -365,8 +398,9 @@ fn cmd_links(store: &Store, config: &Config, args: &LinksArgs) -> Result<ExitCod
     let note = match &args.reference {
         None => store.readers().most_recent()?.context("no notes yet")?,
         Some(reference) => match resolve_required(store, config, reference)? {
-            Some(note) => note,
-            None => return Ok(ExitCode::FAILURE),
+            Resolved::Found(note) => *note,
+            Resolved::Aborted => return Ok(ExitCode::SUCCESS),
+            Resolved::Ambiguous => return Ok(ExitCode::FAILURE),
         },
     };
     let links = store.readers().links_for(note.id)?;
@@ -453,8 +487,9 @@ fn cmd_tag(store: &Store, config: &Config, args: &TagArgs) -> Result<ExitCode> {
     let current = match &args.reference {
         None => store.readers().most_recent()?.context("no notes yet")?,
         Some(reference) => match resolve_required(store, config, reference)? {
-            Some(note) => note,
-            None => return Ok(ExitCode::FAILURE),
+            Resolved::Found(note) => *note,
+            Resolved::Aborted => return Ok(ExitCode::SUCCESS),
+            Resolved::Ambiguous => return Ok(ExitCode::FAILURE),
         },
     };
 
@@ -514,29 +549,38 @@ fn cmd_status(store: &Store, config: &Config, args: &StatusArgs) -> Result<ExitC
     Ok(ExitCode::SUCCESS)
 }
 
+/// Outcome of resolving a user reference to a single note.
+enum Resolved {
+    /// Exactly one note (direct match, or picked from an ambiguous set).
+    Found(Box<Note>),
+    /// Ambiguous and not selected (a numbered list was printed): exit non-zero.
+    Ambiguous,
+    /// The user deliberately aborted the interactive picker: a clean no-op.
+    Aborted,
+}
+
 /// Resolve an ambiguous match to one note via the fzf picker (on a TTY) or a
-/// numbered list otherwise. `Ok(None)` means "no selection; caller should exit
-/// non-zero" (or zero if the user simply aborted the picker).
-fn choose(config: &Config, candidates: &[Note]) -> Result<Option<Note>> {
+/// numbered list otherwise.
+fn choose(config: &Config, candidates: &[Note]) -> Result<Resolved> {
     if std::io::stdout().is_terminal() {
         match picker::pick(config, candidates)? {
-            Pick::Chosen(note) => return Ok(Some(*note)),
-            Pick::Aborted => return Ok(None),
+            Pick::Chosen(note) => return Ok(Resolved::Found(note)),
+            Pick::Aborted => return Ok(Resolved::Aborted),
             Pick::NoFzf => {}
         }
     }
     print_numbered(candidates);
-    Ok(None)
+    Ok(Resolved::Ambiguous)
 }
 
-/// Resolve a required reference to exactly one note. `Ok(None)` means the match
-/// was ambiguous (a picker/numbered list already ran); the caller should exit
-/// non-zero. Bails when nothing matches.
-fn resolve_required(store: &Store, config: &Config, reference: &str) -> Result<Option<Note>> {
+/// Resolve a required reference to exactly one note. Bails when nothing matches;
+/// otherwise returns one note, or an `Ambiguous`/`Aborted` outcome for the caller
+/// to turn into the right exit code.
+fn resolve_required(store: &Store, config: &Config, reference: &str) -> Result<Resolved> {
     let mut candidates = store.readers().resolve_ref(reference)?;
     match candidates.len() {
         0 => bail!("no note matches {reference:?}"),
-        1 => Ok(Some(candidates.remove(0))),
+        1 => Ok(Resolved::Found(Box::new(candidates.remove(0)))),
         _ => choose(config, &candidates),
     }
 }
