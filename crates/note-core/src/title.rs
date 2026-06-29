@@ -28,17 +28,12 @@ pub fn derive_title(title: Option<&str>, body: &str, kind: ContentKind) -> Strin
 fn first_h1(body: &str) -> Option<String> {
     body.lines().find_map(|line| {
         let rest = line.trim().strip_prefix('#')?; // exactly one leading '#'
-        if rest.starts_with(char::is_whitespace) {
-            // '#' followed by whitespace = ATX H1
-            let h = rest.trim();
-            if h.is_empty() {
-                None
-            } else {
-                Some(h.to_string())
-            }
-        } else {
-            None // "## Sub", "#NoSpace" are not H1
-        }
+        // '#' must be followed by whitespace ("## Sub", "#NoSpace" are not H1),
+        // and the trimmed heading text must be non-empty.
+        rest.starts_with(char::is_whitespace)
+            .then(|| rest.trim())
+            .filter(|h| !h.is_empty())
+            .map(str::to_string)
     })
 }
 

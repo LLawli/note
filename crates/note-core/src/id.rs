@@ -49,9 +49,10 @@ impl FromStr for NoteId {
         let s = s.trim();
         let id = Ulid::from_string(s).map_err(IdError::from)?;
         // ulid accepts lowercase (normalizes to uppercase) and silently masks
-        // 26-char overflow inputs. Compare against the uppercased input so valid
-        // lowercase ids pass but overflow/garbage is rejected.
-        if id.to_string() != s.to_ascii_uppercase() {
+        // 26-char overflow inputs. Compare case-insensitively (the canonical form
+        // is ASCII uppercase) so valid lowercase ids pass but overflow/garbage is
+        // rejected — without allocating an uppercased copy of the input.
+        if !id.to_string().eq_ignore_ascii_case(s) {
             return Err(IdError::NonCanonical);
         }
         Ok(Self(id))
@@ -63,7 +64,8 @@ impl FromStr for NoteId {
 // default-features=false (it uses `String` without the std prelude).
 impl Serialize for NoteId {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.0.to_string())
+        // collect_str writes the Display impl directly (no intermediate String).
+        s.collect_str(&self.0)
     }
 }
 

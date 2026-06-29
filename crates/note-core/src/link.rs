@@ -64,17 +64,11 @@ impl FromStr for WikiLink {
             .and_then(|x| x.strip_suffix("]]"))
             .unwrap_or(inner);
         let (target_str, display) = match inner.split_once('|') {
-            Some((t, d)) => {
-                let d = d.trim();
-                (
-                    t,
-                    if d.is_empty() {
-                        None
-                    } else {
-                        Some(d.to_string())
-                    },
-                )
-            }
+            // text right of '|' is the alias; an empty (or whitespace) alias is None.
+            Some((t, d)) => (
+                t,
+                Some(d.trim()).filter(|d| !d.is_empty()).map(str::to_string),
+            ),
             None => (inner, None),
         };
         Ok(Self {

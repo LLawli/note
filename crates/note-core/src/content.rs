@@ -19,6 +19,19 @@ impl ContentKind {
         }
     }
 
+    /// Lenient inverse of [`as_str`](Self::as_str) for stored / serialized
+    /// values: `"plain"` is [`Plain`](Self::Plain); anything else (unknown or
+    /// future tags) falls back to the [`Markdown`](Self::Markdown) default. This
+    /// is the one home for the wire vocabulary — the store's DB-column decode and
+    /// note-md's frontmatter parse both route through it instead of re-matching.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Self {
+        match s {
+            "plain" => Self::Plain,
+            _ => Self::Markdown,
+        }
+    }
+
     #[must_use]
     pub const fn is_markdown(self) -> bool {
         matches!(self, Self::Markdown)
@@ -46,6 +59,13 @@ mod tests {
         assert_eq!(ContentKind::Markdown.as_str(), "markdown");
         assert_eq!(ContentKind::Plain.to_string(), "plain");
         assert_eq!(ContentKind::Markdown.to_string(), "markdown");
+    }
+
+    #[test]
+    fn contentkind_from_wire_is_lenient_inverse() {
+        assert_eq!(ContentKind::from_wire("plain"), ContentKind::Plain);
+        assert_eq!(ContentKind::from_wire("markdown"), ContentKind::Markdown);
+        assert_eq!(ContentKind::from_wire("???"), ContentKind::Markdown);
     }
 
     #[test]
