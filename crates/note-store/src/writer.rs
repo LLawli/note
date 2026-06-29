@@ -154,11 +154,7 @@ fn import(conn: &mut Connection, req: ImportNote) -> Result<(Note, ImportOutcome
         updated: req.updated.unwrap_or(created),
     };
     let tx = conn.transaction()?;
-    let existed: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)",
-        params![note.id.to_string()],
-        |r| r.get(0),
-    )?;
+    let existed = note_exists(&tx, note.id)?;
     // Upsert on the ULID; the FTS triggers keep the index synced for both the
     // insert and the on-conflict update path.
     tx.execute(
@@ -245,18 +241,18 @@ fn replace_links(conn: &mut Connection, source: NoteId, links: &[WikiLink]) -> R
 /// data). Id targets resolve by existence; title targets by unique
 /// effective-title match.
 fn write_links(tx: &Transaction<'_>, source: NoteId, links: &[WikiLink]) -> Result<()> {
-    tx.execute(
-        "DELETE FROM links WHERE source_id = ?1",
-        params![source.to_string()],
+    let source = source.to_string();
+    tx.execute("DELETE FROM links WHERE source_id = ?1", params![source])?;
+    // Prepare the INSERT once and reuse the formatted source id across all links,
+    // rather than re-parsing the SQL and re-allocating the ULID per iteration.
+    let mut stmt = tx.prepare(
+        "INSERT INTO links (source_id, target_kind, target_value, display, resolved_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     for link in links {
         let (kind, value, resolved) = match &link.target {
             WikiTarget::ById(id) => {
-                let exists: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)",
-                    params![id.to_string()],
-                    |r| r.get(0),
-                )?;
+                let exists = note_exists(tx, *id)?;
                 ("id", id.to_string(), exists.then(|| id.to_string()))
             }
             WikiTarget::ByTitle(t) => {
@@ -264,13 +260,20 @@ fn write_links(tx: &Transaction<'_>, source: NoteId, links: &[WikiLink]) -> Resu
                 ("title", t.clone(), resolved.map(|id| id.to_string()))
             }
         };
-        tx.execute(
-            "INSERT INTO links (source_id, target_kind, target_value, display, resolved_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![source.to_string(), kind, value, link.display, resolved],
-        )?;
+        stmt.execute(params![source, kind, value, link.display, resolved])?;
     }
     Ok(())
+}
+
+/// Does a note with this id exist? Shared by import's upsert outcome and the link
+/// writer's id-target resolution.
+fn note_exists(tx: &Transaction<'_>, id: NoteId) -> Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)",
+        params![id.to_string()],
+        |r| r.get(0),
+    )
+    .map_err(Into::into)
 }
 
 fn insert_note(tx: &Transaction<'_>, note: &Note) -> Result<()> {
@@ -295,9 +298,10 @@ fn insert_tags<'a>(
     id: NoteId,
     tags: impl Iterator<Item = &'a Tag>,
 ) -> Result<()> {
+    let id = id.to_string();
     let mut stmt = tx.prepare("INSERT INTO tags (note_id, tag) VALUES (?1, ?2)")?;
     for tag in tags {
-        stmt.execute(params![id.to_string(), tag.as_str()])?;
+        stmt.execute(params![id, tag.as_str()])?;
     }
     Ok(())
 }

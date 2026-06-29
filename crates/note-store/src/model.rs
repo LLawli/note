@@ -1,6 +1,7 @@
 //! Input/output shapes for store operations and row<->domain mapping.
 
 use crate::error::{Result, StoreError};
+use core::fmt;
 use note_core::{ContentKind, Note, NoteId, Tag, Timestamp, WikiLink, WikiTarget};
 use rusqlite::Row;
 use std::collections::BTreeSet;
@@ -60,13 +61,15 @@ pub struct Link {
     pub resolved: Option<NoteId>,
 }
 
-/// Parse a content-kind string as stored in the DB. Unknown values fall back to
-/// markdown (the default). A private helper because `ContentKind::FromStr` is a
-/// later (M2) public concern.
-pub(crate) fn content_kind_from_db(s: &str) -> ContentKind {
-    match s {
-        "plain" => ContentKind::Plain,
-        _ => ContentKind::Markdown,
+impl fmt::Display for Link {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Render as the canonical wikilink body (target plus optional `|alias`),
+        // delegating to note-core's WikiLink Display so the two never diverge.
+        let link = WikiLink {
+            target: self.target.clone(),
+            display: self.display.clone(),
+        };
+        write!(f, "{link}")
     }
 }
 
@@ -74,12 +77,8 @@ pub(crate) fn parse_id(s: &str) -> Result<NoteId> {
     NoteId::from_str(s).map_err(|e| StoreError::Corrupt(format!("note id {s:?}: {e}")))
 }
 
-/// Map a `notes` row (id, title, body, content_kind, created, updated) to a
-/// `Note` with the given tags.
-pub(crate) fn note_from_row(row: &Row<'_>, tags: BTreeSet<Tag>) -> Result<Note> {
-    let mut note = note_from_row_no_tags(row)?;
-    note.tags = tags;
-    Ok(note)
+pub(crate) fn parse_tag(s: &str) -> Result<Tag> {
+    Tag::from_str(s).map_err(|e| StoreError::Corrupt(format!("tag {s:?}: {e}")))
 }
 
 /// Map a `notes` row to a `Note` with an empty tag set (the caller attaches tags,
@@ -91,7 +90,7 @@ pub(crate) fn note_from_row_no_tags(row: &Row<'_>) -> Result<Note> {
         id: parse_id(&id_str)?,
         title: row.get("title")?,
         body: row.get("body")?,
-        content_kind: content_kind_from_db(&kind_str),
+        content_kind: ContentKind::from_wire(&kind_str),
         tags: BTreeSet::new(),
         created: Timestamp::from_unix_millis(row.get("created")?),
         updated: Timestamp::from_unix_millis(row.get("updated")?),

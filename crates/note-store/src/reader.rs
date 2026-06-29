@@ -1,11 +1,11 @@
 //! The read side: a small pool of read-only connections, separate from the
 //! single writer. WAL lets these read concurrently with an in-flight write.
 
-use crate::error::{Result, StoreError};
+use crate::error::Result;
 use crate::model::{self, Link};
 use note_core::{Note, NoteId, Tag, WikiTarget};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -85,9 +85,22 @@ impl ReaderPool {
         f(&guard)
     }
 
-    /// Fetch a single note by its exact id.
+    /// Run an id-selecting query and hydrate the matched notes on a single pooled
+    /// connection (one notes query + one tags query per chunk). The shared shape
+    /// behind every list/search read.
+    fn notes_for<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<Vec<Note>> {
+        self.with(|conn| {
+            let ids = {
+                let mut stmt = conn.prepare(sql)?;
+                collect_ids(stmt.query(params)?)?
+            };
+            load_all(conn, &ids)
+        })
+    }
+
+    /// Fetch a single note by its exact id (the chunk-of-one case of `load_all`).
     pub fn get_note(&self, id: NoteId) -> Result<Option<Note>> {
-        self.with(|conn| load_note(conn, &id.to_string()))
+        self.with(|conn| Ok(load_all(conn, &[id.to_string()])?.into_iter().next()))
     }
 
     /// The most recently updated note, if any (powers `note show` with no arg).
@@ -101,7 +114,7 @@ impl ReaderPool {
                 )
                 .optional()?; // only no-rows -> None; real errors propagate
             match id {
-                Some(id) => load_note(conn, &id),
+                Some(id) => Ok(load_all(conn, &[id])?.into_iter().next()),
                 None => Ok(None),
             }
         })
@@ -111,14 +124,10 @@ impl ReaderPool {
     pub fn list_notes(&self, limit: usize, offset: usize) -> Result<Vec<Note>> {
         let limit = clamp_i64(limit);
         let offset = clamp_i64(offset);
-        self.with(|conn| {
-            let ids = {
-                let mut stmt =
-                    conn.prepare("SELECT id FROM notes ORDER BY updated DESC LIMIT ?1 OFFSET ?2")?;
-                collect_ids(stmt.query(params![limit, offset])?)?
-            };
-            load_all(conn, &ids)
-        })
+        self.notes_for(
+            "SELECT id FROM notes ORDER BY updated DESC LIMIT ?1 OFFSET ?2",
+            params![limit, offset],
+        )
     }
 
     /// Prefix-aware full-text search over a user-typed query: each whitespace
@@ -136,19 +145,14 @@ impl ReaderPool {
     /// query; callers wanting prefix behavior should use [`Self::search_prefix`].
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Note>> {
         let limit = clamp_i64(limit);
-        self.with(|conn| {
-            let ids = {
-                let mut stmt = conn.prepare(
-                    "SELECT n.id FROM notes_fts f
-                     JOIN notes n ON n.rowid = f.rowid
-                     WHERE notes_fts MATCH ?1
-                     ORDER BY rank
-                     LIMIT ?2",
-                )?;
-                collect_ids(stmt.query(params![query, limit])?)?
-            };
-            load_all(conn, &ids)
-        })
+        self.notes_for(
+            "SELECT n.id FROM notes_fts f
+             JOIN notes n ON n.rowid = f.rowid
+             WHERE notes_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+            params![query, limit],
+        )
     }
 
     /// All tags with their note counts, ordered alphabetically.
@@ -160,8 +164,7 @@ impl ReaderPool {
             let mut out = Vec::new();
             for row in rows {
                 let (raw, count) = row?;
-                let tag = Tag::from_str(&raw)
-                    .map_err(|e| StoreError::Corrupt(format!("tag {raw:?}: {e}")))?;
+                let tag = model::parse_tag(&raw)?;
                 out.push((tag, usize::try_from(count).unwrap_or(0)));
             }
             Ok(out)
@@ -171,30 +174,19 @@ impl ReaderPool {
     /// Notes carrying `tag`, most-recently-updated first.
     pub fn list_by_tag(&self, tag: &Tag, limit: usize) -> Result<Vec<Note>> {
         let limit = clamp_i64(limit);
-        self.with(|conn| {
-            let ids = {
-                let mut stmt = conn.prepare(
-                    "SELECT n.id FROM notes n
-                     JOIN tags t ON t.note_id = n.id
-                     WHERE t.tag = ?1
-                     ORDER BY n.updated DESC
-                     LIMIT ?2",
-                )?;
-                collect_ids(stmt.query(params![tag.as_str(), limit])?)?
-            };
-            load_all(conn, &ids)
-        })
+        self.notes_for(
+            "SELECT n.id FROM notes n
+             JOIN tags t ON t.note_id = n.id
+             WHERE t.tag = ?1
+             ORDER BY n.updated DESC
+             LIMIT ?2",
+            params![tag.as_str(), limit],
+        )
     }
 
     /// Every note, ordered most-recently-updated first (powers export).
     pub fn all_notes(&self) -> Result<Vec<Note>> {
-        self.with(|conn| {
-            let ids = {
-                let mut stmt = conn.prepare("SELECT id FROM notes ORDER BY updated DESC")?;
-                collect_ids(stmt.query([])?)?
-            };
-            load_all(conn, &ids)
-        })
+        self.notes_for("SELECT id FROM notes ORDER BY updated DESC", [])
     }
 
     /// Total number of notes (powers `note status`).
@@ -221,13 +213,12 @@ impl ReaderPool {
         // 2. git-style ULID prefix (Crockford chars, shorter than a full id)
         if is_ulid_prefix(r) {
             let pattern = format!("{}%", r.to_ascii_uppercase());
-            let hits = self.with(|conn| {
-                let mut stmt =
-                    conn.prepare("SELECT id FROM notes WHERE id LIKE ?1 ORDER BY id LIMIT 50")?;
-                collect_ids(stmt.query(params![pattern])?)
-            })?;
+            let hits = self.notes_for(
+                "SELECT id FROM notes WHERE id LIKE ?1 ORDER BY id LIMIT 50",
+                params![pattern],
+            )?;
             if !hits.is_empty() {
-                return self.with(|conn| load_all(conn, &hits));
+                return Ok(hits);
             }
         }
         // 3 + 4. exact effective-title match wins; else fall back to the same
@@ -315,7 +306,7 @@ fn title_candidates(conn: &Connection, title: &str) -> Result<(Vec<NoteId>, Vec<
         let effective = note_core::derive_title(
             title_col.as_deref(),
             &body,
-            model::content_kind_from_db(&kind),
+            note_core::ContentKind::from_wire(&kind),
         );
         if effective.to_lowercase() == needle {
             exact.push(nid);
@@ -413,37 +404,10 @@ fn load_chunk(conn: &Connection, ids: &[String], out: &mut HashMap<String, Note>
         let note_id: String = row.get(0)?;
         let raw: String = row.get(1)?;
         if let Some(note) = out.get_mut(&note_id) {
-            let tag = Tag::from_str(&raw)
-                .map_err(|e| StoreError::Corrupt(format!("tag {raw:?}: {e}")))?;
-            note.tags.insert(tag);
+            note.tags.insert(model::parse_tag(&raw)?);
         }
     }
     Ok(())
-}
-
-fn load_note(conn: &Connection, id: &str) -> Result<Option<Note>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title, body, content_kind, created, updated FROM notes WHERE id = ?1",
-    )?;
-    let mut rows = stmt.query(params![id])?;
-    let Some(row) = rows.next()? else {
-        return Ok(None);
-    };
-    let tags = load_tags(conn, id)?;
-    Ok(Some(model::note_from_row(row, tags)?))
-}
-
-fn load_tags(conn: &Connection, id: &str) -> Result<BTreeSet<Tag>> {
-    let mut stmt = conn.prepare("SELECT tag FROM tags WHERE note_id = ?1")?;
-    let rows = stmt.query_map(params![id], |r| r.get::<_, String>(0))?;
-    let mut tags = BTreeSet::new();
-    for tag in rows {
-        let raw = tag?;
-        let parsed =
-            Tag::from_str(&raw).map_err(|e| StoreError::Corrupt(format!("tag {raw:?}: {e}")))?;
-        tags.insert(parsed);
-    }
-    Ok(tags)
 }
 
 #[cfg(test)]
