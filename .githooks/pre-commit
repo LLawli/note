@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Pre-commit gate — fast checks only (formatting + lints). The full test suite
+# is deliberately left to the pre-push hook so commits stay snappy.
+# Emergency bypass: `git commit --no-verify`.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+echo "→ cargo fmt --all -- --check"
+if ! cargo fmt --all -- --check; then
+  echo >&2
+  echo "✗ pre-commit blocked: formatting issues. Fix with: cargo fmt --all" >&2
+  exit 1
+fi
+
+echo "→ cargo clippy --workspace --all-targets -- -D warnings"
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+  echo >&2
+  echo "✗ pre-commit blocked: clippy reported warnings (treated as errors)." >&2
+  exit 1
+fi
+
+echo "✓ pre-commit checks passed"

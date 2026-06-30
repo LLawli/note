@@ -203,6 +203,11 @@ cargo test --workspace
 # Auto-format.
 cargo fmt --all
 
+# Install the git hooks (run once per clone). Hooks live in the versioned
+# .githooks/ dir: pre-commit runs fmt + clippy, pre-push runs the test suite.
+# Bypass in an emergency with `git commit/push --no-verify`.
+git config core.hooksPath .githooks
+
 # Exercise the binary.
 ./target/debug/note --version
 ./target/debug/note                       # launch the TUI
