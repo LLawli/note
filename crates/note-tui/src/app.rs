@@ -7,8 +7,10 @@
 use note_core::{Note, NoteId};
 use note_store::Store;
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::{Constraint, Layout, Size};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
@@ -36,6 +38,15 @@ enum Mode {
     View,
     Search,
     Create,
+    Links,
+}
+
+/// A row in the links panel: a label to display and the note it follows to
+/// (`None` = dangling / not followable).
+#[derive(Debug, Clone)]
+struct LinkRow {
+    label: String,
+    target: Option<NoteId>,
 }
 
 /// Semantic messages. The event loop translates key presses into these.
@@ -57,6 +68,12 @@ pub enum Msg {
     TitleBackspace,
     CreateSubmit,
     CreateCancel,
+    /// Open the links panel for the currently-viewed note.
+    OpenLinks,
+    /// Open the note at this list/search-results index (mouse click).
+    OpenAt(usize),
+    /// Follow the links-panel row at this index.
+    FollowAt(usize),
     Reload,
 }
 
@@ -71,6 +88,12 @@ pub struct App<'a> {
     search: String,
     title: String,
     scroll: u16,
+    /// The stack of viewed notes (top = shown). Following a link pushes; `esc`
+    /// pops — browser-style history. Empty in List/Search/Create.
+    view_stack: Vec<Note>,
+    /// Rows of the links panel (outgoing then backlinks) and the cursor into it.
+    links: Vec<LinkRow>,
+    link_selected: usize,
     status: String,
     running: bool,
     outcome: Outcome,
@@ -88,6 +111,9 @@ impl<'a> App<'a> {
             search: String::new(),
             title: String::new(),
             scroll: 0,
+            view_stack: Vec::new(),
+            links: Vec::new(),
+            link_selected: 0,
             status: String::new(),
             running: true,
             outcome: Outcome::Quit,
@@ -127,6 +153,7 @@ impl<'a> App<'a> {
                 KeyCode::Up | KeyCode::Char('k') => Some(Msg::Up),
                 KeyCode::Down | KeyCode::Char('j') => Some(Msg::Down),
                 KeyCode::Char('e') => Some(Msg::Edit),
+                KeyCode::Char('f') => Some(Msg::OpenLinks),
                 _ => None,
             },
             Mode::Search => match key.code {
@@ -143,11 +170,114 @@ impl<'a> App<'a> {
                 KeyCode::Char(c) => Some(Msg::TitleChar(c)),
                 _ => None,
             },
+            Mode::Links => match key.code {
+                KeyCode::Char('q') => Some(Msg::Quit),
+                KeyCode::Esc | KeyCode::Char('h') => Some(Msg::Back),
+                KeyCode::Up | KeyCode::Char('k') => Some(Msg::Up),
+                KeyCode::Down | KeyCode::Char('j') => Some(Msg::Down),
+                KeyCode::Enter | KeyCode::Char('l') => Some(Msg::FollowAt(self.link_selected)),
+                _ => None,
+            },
+        }
+    }
+
+    /// Translate a mouse event into a semantic message (mirrors [`map_key`]).
+    /// Geometry is recomputed from `size` because `view` is `&self` and stores no
+    /// rects; `size` is 0-based, the same coordinate space as the event.
+    #[must_use]
+    pub fn map_mouse(&self, ev: MouseEvent, size: Size) -> Option<Msg> {
+        match ev.kind {
+            MouseEventKind::ScrollUp => Some(Msg::Up),
+            MouseEventKind::ScrollDown => Some(Msg::Down),
+            MouseEventKind::Down(MouseButton::Left) => self.hit_test(ev.column, ev.row, size),
+            _ => None,
+        }
+    }
+
+    /// Map a left-click at `(col, row)` to an open/follow message for the current
+    /// mode, or `None` when it misses an interactive row.
+    fn hit_test(&self, col: u16, row: u16, size: Size) -> Option<Msg> {
+        // Ignore the 1-row footer and the bordered block's edge columns.
+        if size.height == 0 || row + 1 >= size.height || col == 0 || col + 1 >= size.width {
+            return None;
+        }
+        match self.mode {
+            // List rows start one row below the block's top border.
+            Mode::List => click_index(row, 1, self.notes.len()).map(Msg::OpenAt),
+            // The 3-row input pushes the results list's first row down to 4.
+            Mode::Search => click_index(row, 4, self.notes.len()).map(Msg::OpenAt),
+            Mode::Links => click_index(row, 1, self.links.len()).map(Msg::FollowAt),
+            Mode::View | Mode::Create => None,
         }
     }
 
     fn current(&self) -> Option<&Note> {
         self.notes.get(self.selected)
+    }
+
+    /// The note shown in View mode: the top of the navigation stack.
+    fn viewed(&self) -> Option<&Note> {
+        self.view_stack.last()
+    }
+
+    /// What an `e` edit targets: the viewed note (View/Links) else the list
+    /// selection (List).
+    fn edit_target(&self) -> Option<&Note> {
+        self.viewed().or_else(|| self.current())
+    }
+
+    /// Push the selected list note onto the view stack and enter View mode.
+    fn open_selected(&mut self) {
+        if let Some(note) = self.current().cloned() {
+            self.view_stack.push(note);
+            self.mode = Mode::View;
+            self.scroll = 0;
+        }
+    }
+
+    /// Open a note by id (a followed link): push it onto the stack and show it.
+    fn open_note(&mut self, id: NoteId) {
+        if let Ok(Some(note)) = self.store.readers().get_note(id) {
+            self.view_stack.push(note);
+            self.mode = Mode::View;
+            self.scroll = 0;
+        }
+    }
+
+    /// Build the links panel for the viewed note: outgoing links (with live
+    /// target resolution, so short-id-prefix links resolve like `note show`) then
+    /// backlinks. `self.store` is a borrowed `&Store`, so these reads don't borrow
+    /// `self` and run alongside the field writes.
+    fn build_links(&mut self) {
+        self.link_selected = 0;
+        let Some(id) = self.viewed().map(|n| n.id) else {
+            self.links.clear();
+            return;
+        };
+        let readers = self.store.readers();
+        let mut rows = Vec::new();
+        match readers.links_for(id) {
+            Ok(out) => {
+                for link in &out {
+                    let target = readers.resolve_link(link).ok().flatten();
+                    let label = match target.and_then(|t| readers.get_note(t).ok().flatten()) {
+                        Some(n) => format!("→ {}", n.display_title()),
+                        None => format!("→ {} (dangling)", link.target),
+                    };
+                    rows.push(LinkRow { label, target });
+                }
+            }
+            Err(e) => self.status = format!("error: {e}"),
+        }
+        if let Ok(backs) = readers.backlinks(id) {
+            for n in &backs {
+                rows.push(LinkRow {
+                    label: format!("← {}", n.display_title()),
+                    target: Some(n.id),
+                });
+            }
+        }
+        self.links = rows;
     }
 
     fn reload_all(&mut self) {
@@ -196,7 +326,7 @@ impl<'a> App<'a> {
     /// scrolling cannot run off into blank space past the note. Approximate
     /// (ignores wrapping) but bounded, which is the point.
     fn max_scroll(&self) -> u16 {
-        self.current().map_or(0, |n| {
+        self.viewed().map_or(0, |n| {
             u16::try_from(n.body.lines().count()).unwrap_or(u16::MAX)
         })
     }
@@ -217,27 +347,59 @@ impl Model for App<'_> {
                 self.running = false;
             }
             Msg::Edit => {
-                if let Some(note) = self.current() {
+                if let Some(note) = self.edit_target() {
                     self.outcome = Outcome::Edit(note.id);
                     self.running = false;
                 }
             }
             Msg::Up => match self.mode {
                 Mode::View => self.scroll = self.scroll.saturating_sub(1),
+                Mode::Links => self.link_selected = self.link_selected.saturating_sub(1),
                 _ => self.selected = self.selected.saturating_sub(1),
             },
             Msg::Down => match self.mode {
                 Mode::View => self.scroll = (self.scroll + 1).min(self.max_scroll()),
+                Mode::Links => {
+                    let max = self.links.len().saturating_sub(1);
+                    self.link_selected = (self.link_selected + 1).min(max);
+                }
                 _ => self.select_next(),
             },
             Msg::Open => {
-                if self.mode == Mode::List && !self.notes.is_empty() {
-                    self.mode = Mode::View;
-                    self.scroll = 0;
+                if self.mode == Mode::List {
+                    self.open_selected();
                 }
             }
-            // Back from a view, and applying a search, both land on the list.
-            Msg::Back | Msg::SearchSubmit => self.mode = Mode::List,
+            Msg::OpenAt(i) => {
+                if i < self.notes.len() {
+                    self.selected = i;
+                    self.open_selected();
+                }
+            }
+            Msg::OpenLinks => {
+                if self.mode == Mode::View {
+                    self.build_links();
+                    self.mode = Mode::Links;
+                }
+            }
+            Msg::FollowAt(i) => {
+                if let Some(id) = self.links.get(i).and_then(|r| r.target) {
+                    self.open_note(id);
+                }
+            }
+            // Applying a search lands on the list; Back is history-aware below.
+            Msg::SearchSubmit => self.mode = Mode::List,
+            Msg::Back => match self.mode {
+                Mode::Links => self.mode = Mode::View, // close panel, keep the note
+                Mode::View => {
+                    self.view_stack.pop();
+                    self.scroll = 0;
+                    if self.view_stack.is_empty() {
+                        self.mode = Mode::List;
+                    }
+                }
+                _ => self.mode = Mode::List,
+            },
             Msg::StartSearch => {
                 self.mode = Mode::Search;
                 self.search.clear();
@@ -287,6 +449,7 @@ impl Model for App<'_> {
         match self.mode {
             Mode::List => self.render_list(frame, main),
             Mode::View => self.render_view(frame, main),
+            Mode::Links => self.render_links(frame, main),
             Mode::Search => {
                 let [input, results] =
                     Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(main);
@@ -326,7 +489,14 @@ impl App<'_> {
             ]),
             Mode::View => self.theme.help_line([
                 ("up/down", "scroll"),
+                ("f", "links"),
                 ("e", "edit"),
+                ("esc", "back"),
+                ("q", "quit"),
+            ]),
+            Mode::Links => self.theme.help_line([
+                ("up/down", "move"),
+                ("enter", "follow"),
                 ("esc", "back"),
                 ("q", "quit"),
             ]),
@@ -364,8 +534,31 @@ impl App<'_> {
         frame.render_widget(para, area);
     }
 
+    fn render_links(&self, frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
+        let title = format!("links ({})", self.links.len());
+        let lines: Vec<Line<'_>> = if self.links.is_empty() {
+            vec![Line::from(self.theme.muted("(no links)"))]
+        } else {
+            self.links
+                .iter()
+                .enumerate()
+                .map(|(i, row)| {
+                    if i == self.link_selected {
+                        Line::from(self.theme.accent(format!("> {}", row.label)))
+                    } else if row.target.is_none() {
+                        Line::from(self.theme.muted(format!("  {}", row.label)))
+                    } else {
+                        Line::from(self.theme.span(format!("  {}", row.label)))
+                    }
+                })
+                .collect()
+        };
+        let para = Paragraph::new(lines).block(self.theme.titled_block(title));
+        frame.render_widget(para, area);
+    }
+
     fn render_view(&self, frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
-        let Some(note) = self.current() else {
+        let Some(note) = self.viewed() else {
             frame.render_widget(self.theme.paragraph(self.status.clone()), area);
             return;
         };
@@ -491,12 +684,67 @@ fn is_hash_prefix(s: &str) -> bool {
         .is_some_and(|hashes| (1..=6).contains(&hashes.len()) && hashes.bytes().all(|b| b == b'#'))
 }
 
+/// Map a click `row` to a 0-based list index given the list's first content row
+/// `first` and its item count `len`; `None` when the row is above the list or
+/// past the last item.
+fn click_index(row: u16, first: u16, len: usize) -> Option<usize> {
+    if row < first {
+        return None;
+    }
+    let i = usize::from(row - first);
+    (i < len).then_some(i)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use note_core::ContentKind;
+    use note_core::{ContentKind, WikiLink, WikiTarget};
     use note_store::{NewNote, Store};
     use std::collections::BTreeSet;
+
+    /// A store with a `Source` note that links `[[Target]]` (a resolved link) and
+    /// a `Target` note. Returns the store, its dir, and (source id, target id).
+    fn store_with_link() -> (Store, tempfile::TempDir, NoteId, NoteId) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("notes.sqlite")).unwrap();
+        let target = store
+            .writer()
+            .create_note(NewNote {
+                title: Some("Target".to_owned()),
+                body: "target body".to_owned(),
+                content_kind: ContentKind::Markdown,
+                tags: BTreeSet::new(),
+                links: Vec::new(),
+            })
+            .unwrap();
+        let source = store
+            .writer()
+            .create_note(NewNote {
+                title: Some("Source".to_owned()),
+                body: "see [[Target]]".to_owned(),
+                content_kind: ContentKind::Markdown,
+                tags: BTreeSet::new(),
+                links: vec![WikiLink {
+                    target: WikiTarget::ByTitle("Target".to_owned()),
+                    display: None,
+                }],
+            })
+            .unwrap();
+        (store, dir, source.id, target.id)
+    }
+
+    fn mouse(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        }
+    }
+
+    fn click(col: u16, row: u16) -> MouseEvent {
+        mouse(MouseEventKind::Down(MouseButton::Left), col, row)
+    }
 
     fn store_with(titles: &[&str]) -> (Store, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -775,5 +1023,88 @@ mod tests {
             app.map_key(KeyEvent::from(KeyCode::Backspace)),
             Some(Msg::TitleBackspace)
         );
+    }
+
+    #[test]
+    fn links_panel_follows_outgoing_then_history_back() {
+        let (store, _d, source_id, target_id) = store_with_link();
+        let mut app = loaded(&store);
+        // Select Source by id (the two notes can tie on `updated`, so list order
+        // is not guaranteed).
+        app.selected = app.notes.iter().position(|n| n.id == source_id).unwrap();
+        app.update(Msg::Open); // view Source
+        assert_eq!(app.mode, Mode::View);
+        app.update(Msg::OpenLinks);
+        assert_eq!(app.mode, Mode::Links);
+        assert_eq!(app.links[0].target, Some(target_id)); // outgoing, resolved live
+
+        app.update(Msg::FollowAt(0));
+        assert_eq!(app.mode, Mode::View);
+        assert_eq!(app.viewed().unwrap().id, target_id);
+
+        app.update(Msg::Back); // browser history: back to Source
+        assert_eq!(app.mode, Mode::View);
+        assert_eq!(app.viewed().unwrap().id, source_id);
+        app.update(Msg::Back); // empty stack -> list
+        assert_eq!(app.mode, Mode::List);
+    }
+
+    #[test]
+    fn links_panel_shows_backlinks() {
+        let (store, _d, source_id, target_id) = store_with_link();
+        let mut app = loaded(&store);
+        app.selected = app.notes.iter().position(|n| n.id == target_id).unwrap();
+        app.update(Msg::Open);
+        app.update(Msg::OpenLinks);
+        // Target has no outgoing links; Source links to it (a backlink).
+        let idx = app
+            .links
+            .iter()
+            .position(|r| r.target == Some(source_id))
+            .expect("Source should be a backlink of Target");
+        app.update(Msg::FollowAt(idx));
+        assert_eq!(app.viewed().unwrap().id, source_id);
+    }
+
+    #[test]
+    fn map_key_links_mode() {
+        let (store, _d, _s, _t) = store_with_link();
+        let mut app = loaded(&store);
+        app.update(Msg::Open);
+        app.update(Msg::OpenLinks);
+        assert_eq!(
+            app.map_key(KeyEvent::from(KeyCode::Enter)),
+            Some(Msg::FollowAt(0))
+        );
+        assert_eq!(
+            app.map_key(KeyEvent::from(KeyCode::Char('j'))),
+            Some(Msg::Down)
+        );
+        assert_eq!(app.map_key(KeyEvent::from(KeyCode::Esc)), Some(Msg::Back));
+    }
+
+    #[test]
+    fn map_mouse_hit_tests_by_mode() {
+        let (store, _d, _s, _t) = store_with_link();
+        let mut app = loaded(&store); // List mode, 2 notes
+        let size = Size::new(40, 12);
+
+        // Wheel scrolls regardless of mode.
+        assert_eq!(
+            app.map_mouse(mouse(MouseEventKind::ScrollDown, 5, 5), size),
+            Some(Msg::Down)
+        );
+        // List: rows 1 and 2 are the two notes; row 5 is past them.
+        assert_eq!(app.map_mouse(click(3, 1), size), Some(Msg::OpenAt(0)));
+        assert_eq!(app.map_mouse(click(3, 2), size), Some(Msg::OpenAt(1)));
+        assert_eq!(app.map_mouse(click(3, 5), size), None);
+        // Left border column and the footer row are not interactive.
+        assert_eq!(app.map_mouse(click(0, 1), size), None);
+        assert_eq!(app.map_mouse(click(3, 11), size), None);
+
+        // Links mode: the first link row (row 1) follows index 0.
+        app.update(Msg::Open);
+        app.update(Msg::OpenLinks);
+        assert_eq!(app.map_mouse(click(3, 1), size), Some(Msg::FollowAt(0)));
     }
 }

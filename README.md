@@ -120,12 +120,22 @@ note
 | Screen | Keys |
 |---|---|
 | **List**   | `↑`/`↓` move · `enter` open · `/` search · `n` new · `e` edit · `q` quit |
-| **View**   | `↑`/`↓` scroll · `e` edit · `esc` back · `q` quit |
+| **View**   | `↑`/`↓` scroll · `f` links · `e` edit · `esc` back · `q` quit |
+| **Links**  | `↑`/`↓` move · `enter` follow · `esc` back · `q` quit |
 | **Search** | type to filter · `enter` apply · `esc` cancel |
 | **New**    | type the title · `enter` open `$EDITOR` · `esc` cancel |
 
 Creating (`n`) and editing (`e`) hand off to `$EDITOR`, then drop you back in
 the browser with your changes saved.
+
+**Following links.** Press `f` while reading a note to open its links panel —
+its outgoing `[[wikilinks]]` and its backlinks (notes that point to it).
+Selecting one opens the target; `esc` walks back through where you came from
+(browser-style history).
+
+**Mouse.** The TUI also takes mouse input: click a note in the list or search
+results to open it, click a link in the panel to follow it, and use the scroll
+wheel to scroll a note.
 
 ## Configuration
 

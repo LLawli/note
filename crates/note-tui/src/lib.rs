@@ -11,9 +11,12 @@ pub use app::{App, Msg, Outcome};
 use note_store::Store;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+};
+use ratatui::crossterm::execute;
 use ratatui_tea::Program;
-use std::io;
+use std::io::{self, stdout};
 
 /// Launch the interactive browser over `store`. Sets up the terminal (raw mode +
 /// alternate screen + panic-restoring hook), runs the event loop, and always
@@ -21,9 +24,24 @@ use std::io;
 /// caller whether the user quit or asked to edit a note.
 pub fn run(store: &Store) -> io::Result<Outcome> {
     let mut terminal = ratatui::try_init()?;
+    enable_mouse();
     let outcome = event_loop(store, &mut terminal);
+    let _ = execute!(stdout(), DisableMouseCapture);
     let _ = ratatui::try_restore();
     outcome
+}
+
+/// Enable mouse capture and chain a panic hook that disables it. `ratatui`'s own
+/// panic hook restores raw mode and the alternate screen but not mouse capture,
+/// so without this a panic mid-session would leave the terminal emitting mouse
+/// escape sequences. Disabling on normal exit happens in `run`.
+fn enable_mouse() {
+    let _ = execute!(stdout(), EnableMouseCapture);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(stdout(), DisableMouseCapture);
+        previous(info);
+    }));
 }
 
 fn event_loop<B: Backend>(store: &Store, terminal: &mut Terminal<B>) -> io::Result<Outcome>
@@ -47,6 +65,16 @@ where
                     None => false,
                 }
             }
+            Event::Mouse(ev) => {
+                let size = terminal.size().map_err(Into::into)?;
+                match program.model().map_mouse(ev, size) {
+                    Some(msg) => {
+                        program.send(msg);
+                        true
+                    }
+                    None => false,
+                }
+            }
             Event::Resize(_, _) => true,
             _ => false,
         };
@@ -60,7 +88,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use note_core::ContentKind;
+    use note_core::{ContentKind, WikiLink, WikiTarget};
     use note_store::{NewNote, Store};
     use ratatui::backend::TestBackend;
     use ratatui_tea::Model;
@@ -178,6 +206,50 @@ mod tests {
         assert!(
             rendered.contains("my title"),
             "create prompt should echo the typed title"
+        );
+    }
+
+    #[test]
+    fn renders_links_panel() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("notes.sqlite")).unwrap();
+        // A single note with one (dangling) link, so the opened note and its
+        // panel are unambiguous regardless of list ordering.
+        store
+            .writer()
+            .create_note(NewNote {
+                title: Some("Source".to_owned()),
+                body: "see [[Target]]".to_owned(),
+                content_kind: ContentKind::Markdown,
+                tags: BTreeSet::new(),
+                links: vec![WikiLink {
+                    target: WikiTarget::ByTitle("Target".to_owned()),
+                    display: None,
+                }],
+            })
+            .unwrap();
+
+        let mut app = App::new(&store);
+        let _ = app.update(Msg::Reload);
+        let _ = app.update(Msg::Open); // view Source (most recent)
+        let _ = app.update(Msg::OpenLinks);
+        let program = Program::new(app);
+
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        program.draw(&mut terminal).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("links"), "panel title should render");
+        assert!(
+            rendered.contains("Target"),
+            "the outgoing link label should render"
         );
     }
 }
