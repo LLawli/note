@@ -238,8 +238,8 @@ fn replace_links(conn: &mut Connection, source: NoteId, links: &[WikiLink]) -> R
 
 /// Replace a note's outgoing links within an existing transaction, so the link
 /// graph commits atomically with the note row (invariant: indexes never lag the
-/// data). Id targets resolve by existence; title targets by unique
-/// effective-title match.
+/// data). Id targets resolve by existence; title targets by unique ULID-prefix
+/// then unique effective-title match (so `[[01KWC654QV]]` resolves like `show`).
 fn write_links(tx: &Transaction<'_>, source: NoteId, links: &[WikiLink]) -> Result<()> {
     let source = source.to_string();
     tx.execute("DELETE FROM links WHERE source_id = ?1", params![source])?;
@@ -256,7 +256,7 @@ fn write_links(tx: &Transaction<'_>, source: NoteId, links: &[WikiLink]) -> Resu
                 ("id", id.to_string(), exists.then(|| id.to_string()))
             }
             WikiTarget::ByTitle(t) => {
-                let resolved = crate::reader::resolve_title_to_id(tx, t)?;
+                let resolved = crate::reader::resolve_link_value(tx, t)?;
                 ("title", t.clone(), resolved.map(|id| id.to_string()))
             }
         };

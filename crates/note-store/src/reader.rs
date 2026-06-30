@@ -266,6 +266,42 @@ impl ReaderPool {
             Ok(out)
         })
     }
+
+    /// Notes that link TO `target` (the reverse of the link graph), most-recently
+    /// updated first. Based on the stored `resolved_id`, so a link counts once its
+    /// source note has been written with the target resolved (index-backed via
+    /// `idx_links_resolved`).
+    pub fn backlinks(&self, target: NoteId) -> Result<Vec<Note>> {
+        self.notes_for(
+            "SELECT DISTINCT l.source_id FROM links l
+             JOIN notes n ON n.id = l.source_id
+             WHERE l.resolved_id = ?1
+             ORDER BY n.updated DESC",
+            params![target.to_string()],
+        )
+    }
+
+    /// Resolve a wikilink `ByTitle` value to a unique `NoteId`: a unique git-style
+    /// ULID prefix first (so `[[01KWC654QV]]` resolves like `note show`), else a
+    /// unique exact effective-title match. No FTS fallback (links are
+    /// deterministic). Public mirror of the writer's link resolution.
+    pub fn resolve_link_target(&self, value: &str) -> Result<Option<NoteId>> {
+        self.with(|conn| resolve_link_value(conn, value))
+    }
+
+    /// The note a link currently points to: its stored `resolved` id if present,
+    /// otherwise a fresh resolution against the live DB. Lets a followed/listed
+    /// link reflect a target that appeared after the source was last written
+    /// (e.g. a short-id-prefix link stored before this resolver existed).
+    pub fn resolve_link(&self, link: &Link) -> Result<Option<NoteId>> {
+        if let Some(id) = link.resolved {
+            return Ok(Some(id));
+        }
+        match &link.target {
+            WikiTarget::ById(id) => Ok(self.get_note(*id)?.map(|n| n.id)),
+            WikiTarget::ByTitle(value) => self.resolve_link_target(value),
+        }
+    }
 }
 
 /// Clamp a `usize` count/offset into SQLite's signed `i64` domain.
@@ -324,6 +360,34 @@ pub(crate) fn resolve_title_to_id(conn: &Connection, title: &str) -> Result<Opti
     let (exact, _all) = title_candidates(conn, title)?;
     Ok(if exact.len() == 1 {
         Some(exact[0])
+    } else {
+        None
+    })
+}
+
+/// Resolve a wikilink `ByTitle` token to a unique `NoteId`: a unique git-style
+/// ULID prefix first (matching `note show`), else a unique exact effective-title
+/// match. Never falls back to FTS — a link must resolve deterministically or stay
+/// dangling. Shared by the writer (its transaction) and `ReaderPool::resolve_link`.
+pub(crate) fn resolve_link_value(conn: &Connection, value: &str) -> Result<Option<NoteId>> {
+    if let Some(id) = unique_id_prefix(conn, value)? {
+        return Ok(Some(id));
+    }
+    resolve_title_to_id(conn, value)
+}
+
+/// The single note whose id starts with `value` (a git-style ULID prefix), or
+/// `None` when `value` is not a prefix, matches nothing, or is ambiguous.
+fn unique_id_prefix(conn: &Connection, value: &str) -> Result<Option<NoteId>> {
+    let value = value.trim();
+    if !is_ulid_prefix(value) {
+        return Ok(None);
+    }
+    let pattern = format!("{}%", value.to_ascii_uppercase());
+    let mut stmt = conn.prepare("SELECT id FROM notes WHERE id LIKE ?1 LIMIT 2")?;
+    let ids = collect_ids(stmt.query(params![pattern])?)?;
+    Ok(if ids.len() == 1 {
+        Some(model::parse_id(&ids[0])?)
     } else {
         None
     })

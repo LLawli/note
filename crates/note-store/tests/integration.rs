@@ -505,3 +505,131 @@ fn fts_never_desyncs_from_notes() {
     assert_eq!(all.len(), 7);
     assert_eq!(store.readers().list_notes(100, 0).unwrap().len(), 7);
 }
+
+fn link_by_title(title: &str) -> Vec<WikiLink> {
+    vec![WikiLink {
+        target: WikiTarget::ByTitle(title.to_owned()),
+        display: None,
+    }]
+}
+
+#[test]
+fn wikilink_resolves_by_unique_id_prefix() {
+    let (store, _dir) = tmp_store();
+    let target = store
+        .writer()
+        .create_note(new_note("# Nota real\nbody", &[]))
+        .unwrap();
+    // A git-style id prefix (classified ByTitle by note-core) must resolve like
+    // `note show` does, not dangle. 16 chars includes random bits past the ULID's
+    // 10-char timestamp so it can't collide with the source note's id.
+    let prefix: String = target.id.to_string().chars().take(16).collect();
+    let source = store
+        .writer()
+        .create_note(NewNote {
+            title: None,
+            body: format!("see [[{prefix}]]"),
+            content_kind: ContentKind::Markdown,
+            tags: BTreeSet::new(),
+            links: link_by_title(&prefix),
+        })
+        .unwrap();
+
+    let links = store.readers().links_for(source.id).unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].resolved, Some(target.id));
+}
+
+#[test]
+fn resolve_link_target_prefix_then_title() {
+    let (store, _dir) = tmp_store();
+    let a = store
+        .writer()
+        .create_note(new_note("# Alpha\nx", &[]))
+        .unwrap();
+    store
+        .writer()
+        .create_note(new_note("# Beta\ny", &[]))
+        .unwrap();
+
+    assert_eq!(
+        store.readers().resolve_link_target("Alpha").unwrap(),
+        Some(a.id)
+    );
+    // 16 chars reaches past the shared 10-char timestamp into random bits, so the
+    // prefix is unique to `a` even though `a` and `b` are minted milliseconds apart.
+    let prefix: String = a.id.to_string().chars().take(16).collect();
+    assert_eq!(
+        store.readers().resolve_link_target(&prefix).unwrap(),
+        Some(a.id)
+    );
+    assert_eq!(store.readers().resolve_link_target("Nope").unwrap(), None);
+}
+
+#[test]
+fn backlinks_returns_linking_sources() {
+    let (store, _dir) = tmp_store();
+    let target = store
+        .writer()
+        .create_note(new_note("# Target\nx", &[]))
+        .unwrap();
+    let s1 = store
+        .writer()
+        .create_note(NewNote {
+            title: None,
+            body: "links [[Target]]".to_owned(),
+            content_kind: ContentKind::Markdown,
+            tags: BTreeSet::new(),
+            links: link_by_title("Target"),
+        })
+        .unwrap();
+    let s2 = store
+        .writer()
+        .create_note(NewNote {
+            title: None,
+            body: "also [[Target]]".to_owned(),
+            content_kind: ContentKind::Markdown,
+            tags: BTreeSet::new(),
+            links: link_by_title("Target"),
+        })
+        .unwrap();
+
+    let ids: BTreeSet<_> = store
+        .readers()
+        .backlinks(target.id)
+        .unwrap()
+        .iter()
+        .map(|n| n.id)
+        .collect();
+    assert_eq!(ids, BTreeSet::from([s1.id, s2.id]));
+    assert!(store.readers().backlinks(s1.id).unwrap().is_empty());
+}
+
+#[test]
+fn resolve_link_live_resolves_a_stored_dangling_link() {
+    let (store, _dir) = tmp_store();
+    // Links to a title that does not exist yet -> stored dangling.
+    let source = store
+        .writer()
+        .create_note(NewNote {
+            title: None,
+            body: "see [[Future]]".to_owned(),
+            content_kind: ContentKind::Markdown,
+            tags: BTreeSet::new(),
+            links: link_by_title("Future"),
+        })
+        .unwrap();
+    let link = store.readers().links_for(source.id).unwrap().remove(0);
+    assert_eq!(link.resolved, None);
+
+    // The target appears later; the stored row is still dangling, but live
+    // resolution finds it.
+    let future = store
+        .writer()
+        .create_note(new_note("# Future\nx", &[]))
+        .unwrap();
+    assert_eq!(
+        store.readers().resolve_link(&link).unwrap(),
+        Some(future.id)
+    );
+}
