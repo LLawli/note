@@ -8,11 +8,26 @@
 //!
 //! Run:  cargo test -p note-store --release --test perf -- --ignored --nocapture
 //! Env:  NOTE_PERF_N        corpus size (default 50_000)
+//!       NOTE_PERF_FULL     `1` => also run resolve_ref / list / reindex probes
 //!       NOTE_PERF_ENFORCE  `1` => assert the ceilings (gate); unset => report-only
 //!
 //! Enforcement starts OFF (informative): the numbers print and the run stays
-//! green. Once the ceilings are calibrated from real CI runners, flip
-//! `NOTE_PERF_ENFORCE=1` and make the job a required check.
+//! green. Flip `NOTE_PERF_ENFORCE=1` and make the job required to promote it.
+//!
+//! Ceilings are N-scaled, because most ops grow with corpus size (link
+//! resolution and tag filtering are O(N) / O(N·FTS)). They sit ~2x over these
+//! measured worst cases (GitHub `ubuntu-latest` runner):
+//!
+//!   op                 50k       200k     note
+//!   write/note         2.4ms     2.8ms    O(N) FTS link resolution per write
+//!   search/keystroke   51ms      221ms    broad single-char prefix FTS scan
+//!   backlinks          6.6ms     29ms     ~N/100 backlink notes loaded
+//!   resolve_ref/prefix —         12ms     `id LIKE 'prefix%'` scan
+//!   list_by_tag(500)   —         224ms    a tag on EVERY note (worst case)
+//!   reindex            —         558s     O(N) FTS re-resolution of all links
+//!
+//! A literal 1M build is impractical (~hours) for the same reason write/note
+//! grows, so the gate runs at 50k and 1M stays a manual, rarely-run probe.
 
 use note_core::{ContentKind, NoteId, Tag, WikiLink, WikiTarget};
 use note_store::{NewNote, Store};
@@ -203,6 +218,7 @@ fn title_link(title: &str) -> WikiLink {
 
 #[test]
 #[ignore = "perf gate; run with --release --ignored --nocapture (uses network)"]
+#[allow(clippy::too_many_lines)] // a flat sequence of timed probes reads best inline
 fn perf_corpus() {
     let n = env_usize("NOTE_PERF_N", 50_000).max(2);
     let seeds = load_seeds();
@@ -242,7 +258,11 @@ fn perf_corpus() {
         "WRITE: {n} notes in {build:?} ({:?}/note)",
         build / n as u32
     );
-    gate("write/note", build / n as u32, Duration::from_millis(5));
+    gate(
+        "write/note",
+        build / n as u32,
+        Duration::from_micros(5_000 + n as u64 / 25),
+    );
 
     // ---- (#1) search latency, one query per keystroke ----
     let word = rng.word(&seeds).unwrap_or_else(|| "note".to_owned());
@@ -254,13 +274,21 @@ fn perf_corpus() {
         worst = worst.max(mark.elapsed());
     }
     eprintln!("SEARCH {word:?}: worst keystroke {worst:?} (last hits={hits})");
-    gate("search/keystroke", worst, Duration::from_millis(150));
+    gate(
+        "search/keystroke",
+        worst,
+        Duration::from_millis(60 + n as u64 / 700),
+    );
 
     // ---- (#2) backlinks of the popular Hub ----
     let mark = Instant::now();
     let back = readers.backlinks(hub).unwrap().len();
     eprintln!("BACKLINKS(hub): {back} in {:?}", mark.elapsed());
-    gate("backlinks", mark.elapsed(), Duration::from_millis(50));
+    gate(
+        "backlinks",
+        mark.elapsed(),
+        Duration::from_millis(10 + n as u64 / 3000),
+    );
 
     // The heavier reference/list/reindex probes run only in the full tier
     // (NOTE_PERF_FULL), kept off the per-PR gate so reindex (O(N)) doesn't add
@@ -278,7 +306,7 @@ fn perf_corpus() {
     gate(
         "resolve_ref/title",
         mark.elapsed(),
-        Duration::from_millis(50),
+        Duration::from_millis(20),
     );
 
     let prefix: String = hub.to_string().chars().take(12).collect();
@@ -288,14 +316,14 @@ fn perf_corpus() {
     gate(
         "resolve_ref/prefix",
         mark.elapsed(),
-        Duration::from_millis(50),
+        Duration::from_millis(5 + n as u64 / 8000),
     );
 
     // ---- (#6) list / tag filter ----
     let mark = Instant::now();
     let listed = readers.list_notes(500, 0).unwrap().len();
     eprintln!("LIST_NOTES(500): {listed} in {:?}", mark.elapsed());
-    gate("list_notes(500)", mark.elapsed(), Duration::from_millis(50));
+    gate("list_notes(500)", mark.elapsed(), Duration::from_millis(20));
 
     let mark = Instant::now();
     let by = readers
@@ -306,13 +334,16 @@ fn perf_corpus() {
     gate(
         "list_by_tag(500)",
         mark.elapsed(),
-        Duration::from_millis(100),
+        Duration::from_millis(20 + n as u64 / 600),
     );
 
     // ---- (#4) reindex the whole graph ----
     let mark = Instant::now();
     let changed = writer.reindex().unwrap();
     eprintln!("REINDEX: {changed} changed in {:?}", mark.elapsed());
-    // Scales with link count (O(N)); a loose ceiling pending calibration.
-    gate("reindex", mark.elapsed(), Duration::from_secs(45));
+    gate(
+        "reindex",
+        mark.elapsed(),
+        Duration::from_millis(n as u64 * 6),
+    );
 }
