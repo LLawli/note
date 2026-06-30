@@ -1,8 +1,8 @@
-# Performance probe over a large corpus built at runtime from RSS feeds (no big
-# fixture in the repo; see crates/note-store/tests/perf.rs). Starts INFORMATIONAL:
-# it prints the numbers but is not a required check and does not assert ceilings.
-# To promote it to a gate, set NOTE_PERF_ENFORCE=1 below (after calibrating the
-# ceilings in perf.rs from real runner numbers) and mark the job required.
+# Performance gate over a large corpus built at runtime from RSS feeds (no big
+# fixture in the repo; see crates/note-store/tests/perf.rs). The per-PR `gate`
+# job asserts the N-scaled ceilings (calibrated from real runner numbers) and is
+# a required status check. It still SKIPS (green) if no feed responds, so a
+# network blip never blocks a PR.
 
 name: perf
 
@@ -27,9 +27,9 @@ env:
 
 jobs:
   # Per-PR / per-push: 50k notes, the three core probes (write, search,
-  # backlinks). Report-only for now.
+  # backlinks), asserting the ceilings.
   gate:
-    name: perf 50k (informative)
+    name: perf gate (50k)
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
@@ -40,6 +40,7 @@ jobs:
       - name: Perf corpus (50k)
         env:
           NOTE_PERF_N: "50000"
+          NOTE_PERF_ENFORCE: "1"
         run: cargo test -p note-store --release --test perf -- --ignored --nocapture
 
   # Manual heavy run (default 1M notes): adds the resolve_ref / list / reindex
