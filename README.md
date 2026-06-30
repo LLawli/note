@@ -1,0 +1,178 @@
+# note
+
+**Take notes without leaving the terminal — so you never have to open a GUI note app again.**
+
+[![CI](https://github.com/LLawli/note/actions/workflows/ci.yml/badge.svg)](https://github.com/LLawli/note/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
+Capture a thought, search everything you've written, link notes together, and
+tag them — all from the shell, in the time it would take a graphical app to
+launch. `note` is a single self-contained binary: a scriptable **CLI** for
+quick one-shot commands and an interactive **TUI** for browsing and editing,
+both driving the same store.
+
+Your notes live in **one SQLite file** you own and can back up or sync yourself.
+There is no account, no server, no sync service, and no GUI.
+
+---
+
+## Why
+
+Graphical note apps make you stop, switch windows, wait for a launch, and click
+around — every time you have a thought worth keeping. If you already live in a
+terminal, that context switch is friction with no payoff.
+
+`note` removes it. Capturing a note is one command. Finding one is full-text
+search that's instant even over thousands of notes. The result is a knowledge
+base that keeps up with the speed of thinking, stays entirely on your machine,
+and is trivial to script.
+
+## Features
+
+- **Fast full-text search** over every note, powered by SQLite **FTS5**
+  (prefix-aware: `mensag` finds `mensagem`).
+- **`[[wikilinks]]`** between notes — a Zettelkasten-style knowledge graph,
+  with title/id/alias forms and dangling-link tracking.
+- **Tags** for organizing and filtering.
+- **Markdown or plain text**, your choice per note. Reading a note renders the
+  markdown in the terminal.
+- **Import / export**: bring in existing `.md` files; export to `.md` or
+  `.json` with lossless round-trips.
+- **A real TUI** for browsing, searching, reading, creating, and editing — and
+  a **CLI** that does all of it without ever entering the TUI.
+- **Local-first**: one SQLite file, single user, no network.
+
+## Install
+
+`note` is a single binary named `note`.
+
+### From source (Rust toolchain)
+
+```bash
+# Install the latest from git directly:
+cargo install --git https://github.com/LLawli/note note-cli
+
+# …or clone and build:
+git clone https://github.com/LLawli/note
+cd note
+cargo build --release
+# binary at ./target/release/note
+```
+
+The pinned toolchain (see `rust-toolchain.toml`) is installed automatically by
+`rustup` when you build.
+
+> Prebuilt binaries, a `crates.io` release (`cargo install note`), and OS
+> packages are on the roadmap — see [CHANGELOG.md](CHANGELOG.md).
+
+## Quick start
+
+```bash
+# Capture a note (opens $EDITOR, or pass the body inline):
+note new "Grocery list" -m "milk, eggs, coffee"
+echo "piped body" | note new "From a pipe"
+
+# Find it again (full-text, prefix-aware):
+note search "coffee"
+
+# List the most recently updated notes:
+note list
+
+# Read one (renders markdown; reference by title, short id, or a search):
+note show "Grocery list"
+
+# Edit it in $EDITOR:
+note edit "Grocery list"
+
+# Tags:
+note tag "Grocery list" --add shopping
+note list --tag shopping
+note tags
+
+# Links between notes (Zettelkasten):
+note links "Grocery list"
+
+# Import / export:
+note import ./vault/*.md
+note export ./backup --format md
+
+# Where everything lives:
+note status
+```
+
+Notes are referenced by a friendly handle, never a raw id: a full id, a short
+id prefix (git-style), a case-insensitive title, or a full-text query — in that
+order. Ambiguous references open an `fzf` picker when available, or print a
+numbered list.
+
+Output is TTY-aware: styled markdown on a terminal, raw text when piped or
+redirected (so `note show x > out.md` stays clean). `--json` is available where
+a machine-readable form helps.
+
+## The TUI
+
+Run `note` with no arguments to launch the interactive browser:
+
+```bash
+note
+```
+
+| Screen | Keys |
+|---|---|
+| **List**   | `↑`/`↓` move · `enter` open · `/` search · `n` new · `e` edit · `q` quit |
+| **View**   | `↑`/`↓` scroll · `e` edit · `esc` back · `q` quit |
+| **Search** | type to filter · `enter` apply · `esc` cancel |
+| **New**    | type the title · `enter` open `$EDITOR` · `esc` cancel |
+
+Creating (`n`) and editing (`e`) hand off to `$EDITOR`, then drop you back in
+the browser with your changes saved.
+
+## Configuration
+
+| What | How |
+|---|---|
+| Data directory | Defaults to an absolute platform path (XDG / OS dirs), logged on startup. Override with `--data-dir <DIR>` or `NOTE_DATA_DIR`. |
+| Editor | `$VISUAL` then `$EDITOR`, used by `new` / `edit` and the TUI. |
+| Picker | Optional: `fzf` on `$PATH` is used for ambiguous references. |
+
+All configuration is read once at startup; there are no hidden global settings.
+
+## How it works
+
+`note` is a Rust workspace of five crates with a strict dependency direction
+(front-ends never touch SQLite directly):
+
+```
+note-cli ─┬─> note-tui ──> note-store ──┐
+          ├─> note-store ───────────────┼─> note-core
+          └─> note-md ──────────────────┘
+```
+
+- **`note-core`** — IO-free domain types, typed ids (ULID), errors.
+- **`note-store`** — SQLite with a single-writer actor, a read pool, WAL, and
+  FTS5; a note's text, FTS row, tags, and links all commit in one transaction.
+- **`note-md`** — pure markdown parsing, `[[wikilink]]` extraction, and
+  `md`/`json` conversion.
+- **`note-tui`** — a `ratatui` Elm-style (Model/Msg/Cmd) interface.
+- **`note-cli`** — the `note` binary (clap), which launches the TUI when run
+  bare.
+
+Design notes live in [`docs/`](docs/), and the full engineering rules — the
+stack, invariants, and milestone plan — are in [`CLAUDE.md`](CLAUDE.md).
+
+## Contributing
+
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for the build/test gates, commit conventions, and the milestone-based workflow.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option. Unless you explicitly state otherwise, any contribution
+intentionally submitted for inclusion in this project by you, as defined in the
+Apache-2.0 license, shall be dual-licensed as above, without any additional
+terms or conditions.
