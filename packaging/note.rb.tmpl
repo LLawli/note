@@ -1,0 +1,30 @@
+class Note < Formula
+  desc "Take notes entirely from the terminal (CLI + TUI)"
+  homepage "${HOMEPAGE}"
+  version "${VERSION}"
+  license "MIT OR Apache-2.0"
+
+  on_macos do
+    url "${URL_MAC}"
+    sha256 "${SHA_MAC}"
+  end
+
+  on_linux do
+    on_intel do
+      url "${URL_LINUX_X64}"
+      sha256 "${SHA_LINUX_X64}"
+    end
+    on_arm do
+      url "${URL_LINUX_ARM}"
+      sha256 "${SHA_LINUX_ARM}"
+    end
+  end
+
+  def install
+    bin.install "note"
+  end
+
+  test do
+    assert_match "note", shell_output("#{bin}/note --version")
+  end
+end

@@ -44,26 +44,47 @@ and is trivial to script.
 
 ## Install
 
-`note` is a single binary named `note`.
+`note` is a single self-contained binary. Prebuilt binaries and packages are
+published per [release](https://github.com/LLawli/note/releases); until the first
+tagged release, build from source (the last option works today).
+
+### Prebuilt binary
+
+Download the tarball/zip for your platform from the
+[releases page](https://github.com/LLawli/note/releases/latest) — Linux
+(`x86_64`, `aarch64`), macOS (Apple Silicon), Windows (`x86_64`) — verify it
+against the published `.sha256`, and put `note` on your `$PATH`:
+
+```bash
+tar -xzf note-*-x86_64-unknown-linux-gnu.tar.gz
+sudo install note-*/note /usr/local/bin/
+```
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew install LLawli/tap/note
+```
+
+### Debian / Ubuntu · Fedora / RHEL
+
+Grab the `.deb` or `.rpm` from the release and install it:
+
+```bash
+sudo dpkg -i note_*_amd64.deb     # Debian / Ubuntu
+sudo rpm -i  note-*.x86_64.rpm    # Fedora / RHEL
+```
 
 ### From source (Rust toolchain)
 
 ```bash
-# Install the latest from git directly:
 cargo install --git https://github.com/LLawli/note note-cli
-
-# …or clone and build:
-git clone https://github.com/LLawli/note
-cd note
-cargo build --release
-# binary at ./target/release/note
+# …or: git clone https://github.com/LLawli/note && cd note && cargo build --release
+#       (binary at ./target/release/note)
 ```
 
-The pinned toolchain (see `rust-toolchain.toml`) is installed automatically by
+The pinned toolchain (`rust-toolchain.toml`) is installed automatically by
 `rustup` when you build.
-
-> Prebuilt binaries, a `crates.io` release (`cargo install note`), and OS
-> packages are on the roadmap — see [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start
 
