@@ -42,6 +42,9 @@ pub enum Command {
     Export(ExportArgs),
     /// Show database status.
     Status(StatusArgs),
+    /// Re-resolve every note's `[[wikilinks]]` (refreshes the link graph and
+    /// backlinks after an upgrade or bulk import).
+    Reindex(ReindexArgs),
 }
 
 /// Output format for export.
@@ -199,6 +202,13 @@ pub struct ExportArgs {
 #[derive(Debug, Args)]
 pub struct StatusArgs {
     /// Print status as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ReindexArgs {
+    /// Print the count of changed links as JSON.
     #[arg(long)]
     pub json: bool,
 }

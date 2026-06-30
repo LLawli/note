@@ -36,6 +36,9 @@ enum WriteCmd {
         req: Box<ImportNote>,
         reply: Reply<(Note, ImportOutcome)>,
     },
+    Reindex {
+        reply: Reply<usize>,
+    },
 }
 
 /// Sync handle to the writer thread. Intentionally NOT `Clone`: the store holds
@@ -96,6 +99,15 @@ impl WriterHandle {
             reply,
         })
     }
+
+    /// Re-resolve every link's stored `resolved_id` against the current notes and
+    /// return how many changed. Lets `[[wikilinks]]` written before their target
+    /// existed (or before id-prefix resolution) resolve — and feed backlinks —
+    /// without re-saving each source. A one-shot maintenance pass, not a per-read
+    /// scan.
+    pub fn reindex(&self) -> Result<usize> {
+        self.dispatch(|reply| WriteCmd::Reindex { reply })
+    }
 }
 
 fn run(mut conn: Connection, rx: &Receiver<WriteCmd>) {
@@ -120,8 +132,48 @@ fn run(mut conn: Connection, rx: &Receiver<WriteCmd>) {
             WriteCmd::Import { req, reply } => {
                 let _ = reply.send(import(&mut conn, *req));
             }
+            WriteCmd::Reindex { reply } => {
+                let _ = reply.send(reindex(&mut conn));
+            }
         }
     }
+}
+
+/// Re-resolve every link's `resolved_id` against the current notes (id targets by
+/// existence, title targets by unique ULID-prefix then unique title) and persist
+/// it. Returns how many links changed. The whole pass runs in one transaction.
+fn reindex(conn: &mut Connection) -> Result<usize> {
+    let tx = conn.transaction()?;
+    let links: Vec<(i64, String, String, Option<String>)> = {
+        let mut stmt =
+            tx.prepare("SELECT rowid, target_kind, target_value, resolved_id FROM links")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut changed = 0usize;
+    {
+        let mut upd = tx.prepare("UPDATE links SET resolved_id = ?2 WHERE rowid = ?1")?;
+        for (rowid, kind, value, current) in &links {
+            let resolved: Option<String> = if kind == "id" {
+                note_exists(&tx, crate::model::parse_id(value)?)?.then(|| value.clone())
+            } else {
+                crate::reader::resolve_link_value(&tx, value)?.map(|id| id.to_string())
+            };
+            if &resolved != current {
+                upd.execute(params![rowid, resolved])?;
+                changed += 1;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(changed)
 }
 
 fn create(conn: &mut Connection, input: NewNote) -> Result<Note> {

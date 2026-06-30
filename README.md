@@ -92,6 +92,9 @@ note tags
 # Links between notes (Zettelkasten):
 note links "Grocery list"
 
+# Re-resolve every note's links (e.g. after an upgrade or bulk import):
+note reindex
+
 # Import / export:
 note import ./vault/*.md
 note export ./backup --format md
@@ -131,7 +134,8 @@ the browser with your changes saved.
 **Following links.** Press `f` while reading a note to open its links panel —
 its outgoing `[[wikilinks]]` and its backlinks (notes that point to it).
 Selecting one opens the target; `esc` walks back through where you came from
-(browser-style history).
+(browser-style history). Backlinks come from the resolved link graph; if you
+linked a note before its target existed, run `note reindex` once to refresh it.
 
 **Mouse.** The TUI also takes mouse input: click a note in the list or search
 results to open it, click a link in the panel to follow it, and use the scroll

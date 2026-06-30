@@ -42,7 +42,25 @@ fn help_lists_every_subcommand() {
         .stdout(contains("import"))
         .stdout(contains("export"))
         .stdout(contains("tags"))
-        .stdout(contains("status"));
+        .stdout(contains("status"))
+        .stdout(contains("reindex"));
+}
+
+#[test]
+fn reindex_reresolves_a_dangling_link() {
+    let dir = TempDir::new().unwrap();
+    // Reference a title before it exists -> the stored link is dangling.
+    create(&dir, "Src", "see [[Nota real]]", &[]);
+    create(&dir, "Nota real", "# Nota real\nbody", &[]);
+
+    // Reindex re-resolves the one previously-dangling link.
+    let out = note(&dir).args(["reindex", "--json"]).output().unwrap();
+    assert!(out.status.success());
+    let json = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        json.contains("\"reindexed\": 1"),
+        "expected one re-resolved link: {json}"
+    );
 }
 
 #[test]

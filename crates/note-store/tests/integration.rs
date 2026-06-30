@@ -633,3 +633,41 @@ fn resolve_link_live_resolves_a_stored_dangling_link() {
         Some(future.id)
     );
 }
+
+#[test]
+fn reindex_resolves_dangling_links_and_feeds_backlinks() {
+    let (store, _dir) = tmp_store();
+    // Source links a title that does not exist yet -> stored dangling.
+    let source = store
+        .writer()
+        .create_note(NewNote {
+            title: None,
+            body: "see [[Future]]".to_owned(),
+            content_kind: ContentKind::Markdown,
+            tags: BTreeSet::new(),
+            links: link_by_title("Future"),
+        })
+        .unwrap();
+    let future = store
+        .writer()
+        .create_note(new_note("# Future\nx", &[]))
+        .unwrap();
+    // Until reindex the stored link stays dangling, so backlinks is empty.
+    assert!(store.readers().backlinks(future.id).unwrap().is_empty());
+
+    // Reindex re-resolves the link; now it counts as a backlink.
+    assert_eq!(store.writer().reindex().unwrap(), 1);
+    let link = store.readers().links_for(source.id).unwrap().remove(0);
+    assert_eq!(link.resolved, Some(future.id));
+    let ids: Vec<_> = store
+        .readers()
+        .backlinks(future.id)
+        .unwrap()
+        .iter()
+        .map(|n| n.id)
+        .collect();
+    assert_eq!(ids, vec![source.id]);
+
+    // Reindex is idempotent: a second pass changes nothing.
+    assert_eq!(store.writer().reindex().unwrap(), 0);
+}

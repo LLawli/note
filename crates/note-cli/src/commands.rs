@@ -3,7 +3,7 @@
 
 use crate::cli::{
     Cli, Command, DeleteArgs, EditArgs, ExportArgs, Format, ImportArgs, LinksArgs, ListArgs,
-    NewArgs, SearchArgs, ShowArgs, StatusArgs, TagArgs, TagsArgs,
+    NewArgs, ReindexArgs, SearchArgs, ShowArgs, StatusArgs, TagArgs, TagsArgs,
 };
 use crate::config::Config;
 use crate::editor;
@@ -42,7 +42,18 @@ pub fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Import(args) => cmd_import(&store, &args),
         Command::Export(args) => cmd_export(&store, &args),
         Command::Status(args) => cmd_status(&store, &config, &args),
+        Command::Reindex(args) => cmd_reindex(&store, &args),
     }
+}
+
+fn cmd_reindex(store: &Store, args: &ReindexArgs) -> Result<ExitCode> {
+    let changed = store.writer().reindex()?;
+    if args.json {
+        println!("{}", to_json(&serde_json::json!({ "reindexed": changed }))?);
+    } else {
+        eprintln!("reindexed {changed} links");
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_import(store: &Store, args: &ImportArgs) -> Result<ExitCode> {

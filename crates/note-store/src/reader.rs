@@ -268,9 +268,13 @@ impl ReaderPool {
     }
 
     /// Notes that link TO `target` (the reverse of the link graph), most-recently
-    /// updated first. Based on the stored `resolved_id`, so a link counts once its
-    /// source note has been written with the target resolved (index-backed via
-    /// `idx_links_resolved`).
+    /// updated first, from the stored `resolved_id` (index-backed via
+    /// `idx_links_resolved`). A link counts once its source was written with the
+    /// target resolved; run `note reindex` to refresh stored resolutions so links
+    /// written before their target existed (or before id-prefix resolution) are
+    /// counted. (A read-time re-resolution scan was measured at ~235ms over 10k
+    /// notes — far too slow for every panel open — so resolution stays at write
+    /// time.)
     pub fn backlinks(&self, target: NoteId) -> Result<Vec<Note>> {
         self.notes_for(
             "SELECT DISTINCT l.source_id FROM links l

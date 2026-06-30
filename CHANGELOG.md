@@ -25,8 +25,16 @@ items below describe what is implemented today.
   prompt (`n`), and **edit** a note (`e`) via `$EDITOR`.
   - In-frame markdown rendering strips `#` heading markers, differentiates
     heading levels, and draws fenced code blocks as a labelled box.
+  - **Follow links** from a panel (`f`): outgoing `[[wikilinks]]` and backlinks,
+    with browser-style `esc` history.
+  - **Mouse support**: click a list/search row to open it, click a link to
+    follow it, and scroll with the wheel.
 - **`[[wikilinks]]`**: extraction and a resolved/dangling link graph that is
-  rewritten on every write, in the same transaction as the note.
+  rewritten on every write, in the same transaction as the note. Targets resolve
+  by unique id prefix too, so a short id like `[[01ARZ…]]` resolves like
+  `note show`. `note links` opens an `fzf` picker to follow a link, and
+  `note reindex` re-resolves the whole graph (refreshing backlinks for links
+  written before their target existed).
 - **Tags**: per-note tags with listing, counts, and tag-filtered listing.
 - **Import / export**: idempotent `.md` / `.json` import (upsert on note id)
   and atomic `.md` / `.json` export with export↔import round-trips.
