@@ -23,6 +23,9 @@ pub enum Outcome {
     Quit,
     /// The user asked to edit this note (the CLI runs `$EDITOR`, then re-enters).
     Edit(NoteId),
+    /// The user asked to create a note with this (possibly empty) title; the CLI
+    /// opens `$EDITOR` seeded with the title as an H1, then re-enters.
+    New { title: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +33,7 @@ enum Mode {
     List,
     View,
     Search,
+    Create,
 }
 
 /// Semantic messages. The event loop translates key presses into these.
@@ -46,6 +50,11 @@ pub enum Msg {
     SearchBackspace,
     SearchSubmit,
     SearchCancel,
+    StartCreate,
+    TitleChar(char),
+    TitleBackspace,
+    CreateSubmit,
+    CreateCancel,
     Reload,
 }
 
@@ -58,6 +67,7 @@ pub struct App<'a> {
     notes: Vec<Note>,
     selected: usize,
     search: String,
+    title: String,
     scroll: u16,
     status: String,
     running: bool,
@@ -74,6 +84,7 @@ impl<'a> App<'a> {
             notes: Vec::new(),
             selected: 0,
             search: String::new(),
+            title: String::new(),
             scroll: 0,
             status: String::new(),
             running: true,
@@ -105,6 +116,7 @@ impl<'a> App<'a> {
                 KeyCode::Enter | KeyCode::Char('l') => Some(Msg::Open),
                 KeyCode::Char('/') => Some(Msg::StartSearch),
                 KeyCode::Char('e') => Some(Msg::Edit),
+                KeyCode::Char('n') => Some(Msg::StartCreate),
                 _ => None,
             },
             Mode::View => match key.code {
@@ -120,6 +132,13 @@ impl<'a> App<'a> {
                 KeyCode::Enter => Some(Msg::SearchSubmit),
                 KeyCode::Backspace => Some(Msg::SearchBackspace),
                 KeyCode::Char(c) => Some(Msg::SearchChar(c)),
+                _ => None,
+            },
+            Mode::Create => match key.code {
+                KeyCode::Esc => Some(Msg::CreateCancel),
+                KeyCode::Enter => Some(Msg::CreateSubmit),
+                KeyCode::Backspace => Some(Msg::TitleBackspace),
+                KeyCode::Char(c) => Some(Msg::TitleChar(c)),
                 _ => None,
             },
         }
@@ -235,6 +254,26 @@ impl Model for App<'_> {
                 self.search.clear();
                 self.reload_all();
             }
+            // Create is not gated on `current()`, so `n` works on an empty list
+            // (creating the first note) — unlike Edit, which needs a selection.
+            Msg::StartCreate => {
+                self.mode = Mode::Create;
+                self.title.clear();
+            }
+            Msg::TitleChar(c) => self.title.push(c),
+            Msg::TitleBackspace => {
+                self.title.pop();
+            }
+            Msg::CreateSubmit => {
+                self.outcome = Outcome::New {
+                    title: self.title.trim().to_owned(),
+                };
+                self.running = false;
+            }
+            Msg::CreateCancel => {
+                self.mode = Mode::List;
+                self.title.clear();
+            }
         }
         Cmd::none()
     }
@@ -256,6 +295,16 @@ impl Model for App<'_> {
                 frame.render_widget(bar, input);
                 self.render_list(frame, results);
             }
+            Mode::Create => {
+                let [input, results] =
+                    Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(main);
+                let bar = self
+                    .theme
+                    .paragraph(self.title.clone())
+                    .block(self.theme.titled_block("new note"));
+                frame.render_widget(bar, input);
+                self.render_list(frame, results);
+            }
         }
 
         frame.render_widget(Paragraph::new(self.footer_help()), footer);
@@ -269,6 +318,7 @@ impl App<'_> {
                 ("up/down", "move"),
                 ("enter", "open"),
                 ("/", "search"),
+                ("n", "new"),
                 ("e", "edit"),
                 ("q", "quit"),
             ]),
@@ -282,6 +332,11 @@ impl App<'_> {
                 self.theme
                     .help_line([("type", "filter"), ("enter", "apply"), ("esc", "cancel")])
             }
+            Mode::Create => self.theme.help_line([
+                ("type", "title"),
+                ("enter", "open editor"),
+                ("esc", "cancel"),
+            ]),
         }
     }
 
@@ -478,5 +533,102 @@ mod tests {
         app.update(Msg::StartSearch);
         // in search mode, '/' is just a character
         assert_eq!(app.map_key(slash), Some(Msg::SearchChar('/')));
+    }
+
+    #[test]
+    fn start_create_enters_create_mode() {
+        let (store, _d) = store_with(&["a"]);
+        let mut app = loaded(&store);
+        app.update(Msg::StartCreate);
+        assert_eq!(app.mode, Mode::Create);
+        assert_eq!(app.title, "");
+    }
+
+    #[test]
+    fn typing_title_builds_buffer() {
+        let (store, _d) = store_with(&["a"]);
+        let mut app = loaded(&store);
+        app.update(Msg::StartCreate);
+        for c in "idea".chars() {
+            app.update(Msg::TitleChar(c));
+        }
+        assert_eq!(app.title, "idea");
+        app.update(Msg::TitleBackspace);
+        assert_eq!(app.title, "ide");
+    }
+
+    #[test]
+    fn create_submit_returns_new_outcome_trimmed() {
+        let (store, _d) = store_with(&["a"]);
+        let mut app = loaded(&store);
+        app.update(Msg::StartCreate);
+        for c in "  ideas  ".chars() {
+            app.update(Msg::TitleChar(c));
+        }
+        app.update(Msg::CreateSubmit);
+        assert!(!app.is_running());
+        assert_eq!(
+            app.outcome(),
+            Outcome::New {
+                title: "ideas".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn create_cancel_returns_to_list() {
+        let (store, _d) = store_with(&["a"]);
+        let mut app = loaded(&store);
+        app.update(Msg::StartCreate);
+        app.update(Msg::TitleChar('x'));
+        app.update(Msg::CreateCancel);
+        assert_eq!(app.mode, Mode::List);
+        assert_eq!(app.title, "");
+        assert!(app.is_running());
+    }
+
+    #[test]
+    fn create_works_on_empty_store() {
+        // `n` must work with zero notes (create the first one), unlike `e`.
+        let (store, _d) = store_with(&[]);
+        let mut app = loaded(&store);
+        assert!(app.notes.is_empty());
+        app.update(Msg::StartCreate);
+        app.update(Msg::CreateSubmit);
+        assert!(!app.is_running());
+        assert_eq!(
+            app.outcome(),
+            Outcome::New {
+                title: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn map_key_create_mode() {
+        let (store, _d) = store_with(&["a"]);
+        let mut app = loaded(&store);
+        assert_eq!(
+            app.map_key(KeyEvent::from(KeyCode::Char('n'))),
+            Some(Msg::StartCreate)
+        );
+        app.update(Msg::StartCreate);
+        // in create mode, 'n' is literal text; Enter/Esc submit/cancel.
+        assert_eq!(
+            app.map_key(KeyEvent::from(KeyCode::Char('n'))),
+            Some(Msg::TitleChar('n'))
+        );
+        assert_eq!(
+            app.map_key(KeyEvent::from(KeyCode::Enter)),
+            Some(Msg::CreateSubmit)
+        );
+        assert_eq!(
+            app.map_key(KeyEvent::from(KeyCode::Esc)),
+            Some(Msg::CreateCancel)
+        );
+        assert_eq!(
+            app.map_key(KeyEvent::from(KeyCode::Backspace)),
+            Some(Msg::TitleBackspace)
+        );
     }
 }

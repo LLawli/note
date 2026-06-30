@@ -142,4 +142,38 @@ mod tests {
         );
         assert!(rendered.contains("some body text"), "body should render");
     }
+
+    #[test]
+    fn renders_create_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("notes.sqlite")).unwrap();
+
+        let mut app = App::new(&store);
+        let _ = app.update(Msg::Reload);
+        let _ = app.update(Msg::StartCreate);
+        for c in "my title".chars() {
+            let _ = app.update(Msg::TitleChar(c));
+        }
+        let program = Program::new(app);
+
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        program.draw(&mut terminal).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(
+            rendered.contains("new note"),
+            "create prompt should show the 'new note' block title"
+        );
+        assert!(
+            rendered.contains("my title"),
+            "create prompt should echo the typed title"
+        );
+    }
 }

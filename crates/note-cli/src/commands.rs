@@ -180,13 +180,14 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run the interactive TUI, re-entering it after each in-app edit request so the
-/// user can edit a note in `$EDITOR` and return to browsing.
+/// Run the interactive TUI, re-entering it after each in-app edit/create request
+/// so the user can edit or write a note in `$EDITOR` and return to browsing.
 fn run_tui(store: &Store, config: &Config) -> Result<ExitCode> {
     loop {
         match note_tui::run(store).context("running the TUI")? {
             note_tui::Outcome::Quit => return Ok(ExitCode::SUCCESS),
             note_tui::Outcome::Edit(id) => edit_note_in_editor(store, config, id)?,
+            note_tui::Outcome::New { title } => new_note_in_editor(store, config, &title)?,
         }
     }
 }
@@ -222,6 +223,41 @@ fn edit_note_in_editor(store: &Store, config: &Config, id: NoteId) -> Result<()>
         body,
     };
     store.writer().update_note(id, patch)?;
+    Ok(())
+}
+
+/// Create a note from the TUI's create request: open `$EDITOR` seeded with the
+/// typed title as an H1, then persist the body. Mirrors [`edit_note_in_editor`];
+/// failures are reported but never abort the TUI session.
+fn new_note_in_editor(store: &Store, config: &Config, title: &str) -> Result<()> {
+    let seed = if title.is_empty() {
+        String::new()
+    } else {
+        format!("# {title}\n\n")
+    };
+    let body = match editor::capture_body(config, &seed) {
+        Ok(body) => body.trim_end().to_owned(),
+        Err(err) => {
+            eprintln!("create cancelled: {err:#}");
+            return Ok(());
+        }
+    };
+    // The title lives as an H1 in the body (the seed), so it is derived from
+    // there at display time — same as `note new` with no `--title`.
+    if is_empty_note(&body, None) {
+        eprintln!("create cancelled: refusing to create an empty note");
+        return Ok(());
+    }
+    store
+        .writer()
+        .create_note(NewNote {
+            title: None,
+            links: note_md::extract_wikilinks(&body),
+            body,
+            content_kind: ContentKind::Markdown,
+            tags: BTreeSet::new(),
+        })
+        .context("creating note from the TUI")?;
     Ok(())
 }
 
@@ -646,4 +682,62 @@ fn short_id(id: NoteId) -> String {
 
 fn to_json<T: serde::Serialize>(value: &T) -> Result<String> {
     serde_json::to_string_pretty(value).context("serializing JSON")
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    /// Write an executable shell script into `dir` to use as a fake `$EDITOR`.
+    /// It receives the buffer file (seeded by `capture_body`) as its first arg.
+    fn fake_editor(dir: &Path, name: &str, script: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn config_with_editor(dir: &Path, editor: &Path) -> Config {
+        Config {
+            data_dir: dir.to_owned(),
+            editor: Some(editor.to_string_lossy().into_owned()),
+        }
+    }
+
+    #[test]
+    fn new_note_in_editor_seeds_title_and_extracts_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("notes.sqlite")).unwrap();
+        // Append a body, preserving the seeded `# <title>` H1 so the title flows
+        // from the TUI prompt through to the stored note.
+        let editor = fake_editor(
+            dir.path(),
+            "ed.sh",
+            "#!/bin/sh\nprintf 'body [[x]]\\n' >> \"$1\"\n",
+        );
+        let config = config_with_editor(dir.path(), &editor);
+
+        new_note_in_editor(&store, &config, "meu titulo").unwrap();
+
+        assert_eq!(store.readers().count_notes().unwrap(), 1);
+        let note = store.readers().most_recent().unwrap().unwrap();
+        assert_eq!(note.display_title(), "meu titulo");
+        assert!(note.content_kind.is_markdown());
+        assert_eq!(store.readers().links_for(note.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn new_note_in_editor_refuses_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("notes.sqlite")).unwrap();
+        // Empty title -> empty seed; this editor leaves the buffer empty.
+        let editor = fake_editor(dir.path(), "noop.sh", "#!/bin/sh\n: > \"$1\"\n");
+        let config = config_with_editor(dir.path(), &editor);
+
+        new_note_in_editor(&store, &config, "").unwrap();
+
+        assert_eq!(store.readers().count_notes().unwrap(), 0);
+    }
 }
