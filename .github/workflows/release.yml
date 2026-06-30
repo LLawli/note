@@ -155,10 +155,10 @@ jobs:
           body_path: notes.md
           files: release/*
 
-  # Updates the Homebrew tap formula from the released tarballs. Disabled until
-  # you opt in: create a `homebrew-tap` repo under this owner, add a
-  # `HOMEBREW_TAP_TOKEN` secret (a PAT that can push to it), and set the
-  # `HOMEBREW_TAP` repository variable to `true`. Until then this job is skipped.
+  # Renders the Homebrew formula from the released tarballs' checksums and pushes
+  # it to the `homebrew-tap` repo over SSH using a write-scoped deploy key. Gated
+  # on the `HOMEBREW_TAP` repo variable; the key lives in the
+  # `HOMEBREW_TAP_DEPLOY_KEY` secret. (To disable, unset the variable.)
   homebrew:
     name: update Homebrew tap
     needs: build
@@ -185,9 +185,14 @@ jobs:
           cat note.rb
       - name: Push to the tap
         env:
-          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
-          git clone "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY_OWNER}/homebrew-tap" tap
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes"
+          git clone "git@github.com:${GITHUB_REPOSITORY_OWNER}/homebrew-tap.git" tap
           install -D note.rb tap/Formula/note.rb
           cd tap
           git config user.name "github-actions[bot]"

@@ -41,13 +41,17 @@ items below describe what is implemented today.
 - **Storage**: a single SQLite file with a single-writer actor, a read pool,
   WAL mode, FTS5, and `refinery` migrations.
 - **Project**: dual `MIT OR Apache-2.0` license, README, contributing guide,
-  versioned git hooks (`pre-commit`: fmt + clippy; `pre-push`: tests), and a CI
-  workflow running format, lint, and tests.
+  code of conduct, security policy, issue/PR templates, and versioned git hooks
+  (`pre-commit`: fmt + clippy; `pre-push`: tests).
+- **CI/CD**: a check workflow (format, lint, tests, audit), a performance gate
+  over a large RSS-seeded corpus, and a tagged-release pipeline producing
+  multi-platform prebuilt binaries (Linux x86_64/aarch64, macOS Apple Silicon,
+  Windows x86_64), `.deb`/`.rpm` packages, a Homebrew tap formula, and a GitHub
+  Release with checksums and the CHANGELOG section.
 
 ### Roadmap
 
-- Prebuilt binaries and OS packages (tarballs, Homebrew, AUR, RPM/DEB).
 - A `crates.io` release so `cargo install note` works.
-- A tagged-release pipeline (checksums, GitHub Releases).
+- An AUR `-bin` package.
 
 [Unreleased]: https://github.com/LLawli/note/commits/master
