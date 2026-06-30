@@ -1,0 +1,52 @@
+# Minimal release pipeline: a `v*.*.*` tag produces a downloadable, checksummed
+# Linux x86_64 binary as a GitHub Release. Deliberately the "minimum" — wider
+# target matrices, macOS signing/notarization, crates.io publishing, and OS
+# packages (Homebrew/AUR/RPM/DEB) are intentionally left as follow-up work.
+#
+# Cut a release with:
+#   git tag v0.1.0 && git push origin v0.1.0
+
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build & publish (linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked -p note-cli
+
+      - name: Package tarball + checksum
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          dist="note-${tag}-x86_64-unknown-linux-gnu"
+          mkdir -p "$dist"
+          cp target/release/note "$dist"/
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$dist"/
+          tar -czf "${dist}.tar.gz" "$dist"
+          sha256sum "${dist}.tar.gz" > "${dist}.tar.gz.sha256"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            note-*.tar.gz
+            note-*.tar.gz.sha256
+          generate_release_notes: true
