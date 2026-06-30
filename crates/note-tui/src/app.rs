@@ -9,10 +9,12 @@ use note_store::Store;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout};
-use ratatui::text::{Line, Text};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui_bubbletea_theme::BubbleTheme;
 use ratatui_tea::{Cmd, Model};
+use tui_markdown::{Options, StyleSheet};
 
 const LIST_LIMIT: usize = 500;
 
@@ -369,9 +371,9 @@ impl App<'_> {
         };
         // Markdown notes are rendered (headings/bold/lists styled); plain notes
         // are shown verbatim. termimad can't draw into a ratatui frame, so the
-        // TUI uses tui-markdown to convert markdown into ratatui Text.
+        // TUI uses tui-markdown, then strips the `#`/``` markers it emits raw.
         let text: Text<'_> = if note.content_kind.is_markdown() {
-            tui_markdown::from_str(&note.body)
+            render_markdown(&note.body)
         } else {
             Text::raw(note.body.as_str())
         };
@@ -381,6 +383,112 @@ impl App<'_> {
             .scroll((self.scroll, 0));
         frame.render_widget(para, area);
     }
+}
+
+/// Markers that redraw a fenced code block once its raw ``` fences are removed:
+/// a top rule that carries the language label, a left gutter, and a bottom rule.
+const CODE_TOP: &str = "┌─ ";
+const CODE_GUTTER: &str = "│ ";
+const CODE_BOTTOM: &str = "└─";
+
+/// Markdown theme for the in-frame renderer. A terminal can't change font size,
+/// so heading levels are differentiated by color/weight/decoration: H1 is a
+/// reversed banner so it can't be mistaken for the plain-bold H2, then each
+/// lower level drops a degree of emphasis.
+#[derive(Clone, Copy, Debug)]
+struct MarkdownStyle;
+
+impl StyleSheet for MarkdownStyle {
+    fn heading(&self, level: u8) -> Style {
+        match level {
+            1 => Style::new().fg(Color::Black).bg(Color::Cyan).bold(),
+            2 => Style::new().fg(Color::Cyan).bold(),
+            3 => Style::new().fg(Color::Cyan).italic(),
+            4 => Style::new().fg(Color::Cyan).dim(),
+            _ => Style::new().fg(Color::Cyan).dim().italic(),
+        }
+    }
+
+    fn code(&self) -> Style {
+        Style::new().fg(Color::Gray)
+    }
+
+    fn link(&self) -> Style {
+        Style::new().fg(Color::Blue).underlined()
+    }
+
+    fn blockquote(&self) -> Style {
+        Style::new().fg(Color::Green).italic()
+    }
+
+    fn heading_meta(&self) -> Style {
+        Style::new().dim()
+    }
+
+    fn metadata_block(&self) -> Style {
+        Style::new().fg(Color::LightYellow)
+    }
+}
+
+/// Render a note's markdown to themed ratatui `Text`, then clean up the raw
+/// markers tui-markdown emits verbatim (heading `#`s and code-fence lines).
+fn render_markdown(body: &str) -> Text<'_> {
+    let options = Options::new(MarkdownStyle);
+    clean_markdown(tui_markdown::from_str_with_options(body, &options))
+}
+
+/// Rewrite the raw markers tui-markdown emits verbatim: strip the `#…` heading
+/// prefixes, and replace a fenced code block's ``` fences with a light box — a
+/// top rule labelled with the language, a left gutter, and a bottom rule — so it
+/// reads as a code block (and still shows e.g. that it is `json`).
+fn clean_markdown(text: Text<'_>) -> Text<'_> {
+    let rule = Style::new().fg(Color::DarkGray);
+    let lang_style = Style::new().fg(Color::Gray);
+    let mut lines: Vec<Line<'_>> = Vec::with_capacity(text.lines.len());
+    let mut in_code = false;
+    for mut line in text.lines {
+        // A fence is a single span: ```` ```lang ```` opens, ```` ``` ```` closes.
+        let fence_lang = line
+            .spans
+            .first()
+            .and_then(|s| s.content.strip_prefix("```"))
+            .map(|lang| lang.trim().to_owned());
+        if let Some(lang) = fence_lang {
+            if in_code {
+                in_code = false;
+                lines.push(Line::from(Span::styled(CODE_BOTTOM, rule)));
+            } else {
+                in_code = true;
+                let top = if lang.is_empty() {
+                    Line::from(Span::styled(CODE_TOP.trim_end(), rule))
+                } else {
+                    Line::from(vec![
+                        Span::styled(CODE_TOP, rule),
+                        Span::styled(lang, lang_style),
+                    ])
+                };
+                lines.push(top);
+            }
+            continue;
+        }
+        if in_code {
+            line.spans.insert(0, Span::styled(CODE_GUTTER, rule));
+        } else if line
+            .spans
+            .first()
+            .is_some_and(|s| is_hash_prefix(&s.content))
+        {
+            line.spans.remove(0);
+        }
+        lines.push(line);
+    }
+    Text::from(lines)
+}
+
+/// True for a tui-markdown heading prefix span: 1–6 `#` then a single space.
+fn is_hash_prefix(s: &str) -> bool {
+    s.strip_suffix(' ')
+        .is_some_and(|hashes| (1..=6).contains(&hashes.len()) && hashes.bytes().all(|b| b == b'#'))
 }
 
 #[cfg(test)]
@@ -602,6 +710,43 @@ mod tests {
                 title: String::new()
             }
         );
+    }
+
+    #[test]
+    fn markdown_strips_hash_and_boxes_code_block() {
+        let text = render_markdown("# Title\n\nbody\n\n```json\n{\"a\":1}\n```\n");
+        let spans: Vec<String> = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        // heading marker gone, heading text kept
+        assert!(
+            !spans.iter().any(|s| s == "# "),
+            "the '# ' marker must be stripped"
+        );
+        assert!(spans.iter().any(|s| s == "Title"), "heading text stays");
+        // no raw fence line survives
+        for line in &text.lines {
+            let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                !joined.starts_with("```"),
+                "fence line must be stripped: {joined:?}"
+            );
+        }
+        // the language label is shown instead of the raw fence
+        assert!(
+            spans.iter().any(|s| s == "json"),
+            "code block should label its language"
+        );
+        // the block is boxed: a top rule and a left gutter
+        let starts_with = |ch: char| {
+            text.lines
+                .iter()
+                .any(|l| l.spans.first().is_some_and(|s| s.content.starts_with(ch)))
+        };
+        assert!(starts_with('┌'), "code block should have a top rule");
+        assert!(starts_with('│'), "code interior should have a gutter");
     }
 
     #[test]

@@ -134,11 +134,15 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
-        // markdown is rendered (tui-markdown styles the heading; it keeps the
-        // '#' marker, unlike the CLI's termimad which strips it).
+        // markdown is rendered and the heading `#` marker is stripped by
+        // render_markdown (the heading text and its per-level style remain).
         assert!(
             rendered.contains("Heading One"),
             "heading text should render"
+        );
+        assert!(
+            !rendered.contains("# Heading One"),
+            "the '#' marker should be stripped"
         );
         assert!(rendered.contains("some body text"), "body should render");
     }
