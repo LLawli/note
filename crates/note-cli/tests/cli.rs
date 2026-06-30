@@ -399,6 +399,27 @@ fn links_are_extracted_and_resolved_on_write() {
 }
 
 #[test]
+fn links_resolve_a_short_id_prefix() {
+    let dir = TempDir::new().unwrap();
+    let target = create(&dir, "Nota real", "# Nota real\nbody", &[]);
+    let prefix: String = target.chars().take(10).collect();
+    let source = create(&dir, "Src", &format!("see [[{prefix}]]"), &[]);
+
+    let out = note(&dir)
+        .args(["links", &source, "--json"])
+        .output()
+        .unwrap();
+    let json = String::from_utf8(out.stdout).unwrap();
+    // A `[[01KWC654QV]]`-style short id prefix resolves to the full target id
+    // (like `note show`), not dangling. (`display` is null since there's no
+    // alias, so assert on the `resolved` field specifically.)
+    assert!(
+        json.contains(&format!("\"resolved\": \"{target}\"")),
+        "prefix link should resolve to the target id in {json}"
+    );
+}
+
+#[test]
 fn editing_body_rewrites_the_link_graph() {
     let dir = TempDir::new().unwrap();
     create(&dir, "A", "node a", &[]);

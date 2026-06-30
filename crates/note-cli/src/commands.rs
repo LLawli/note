@@ -424,29 +424,69 @@ fn cmd_links(store: &Store, config: &Config, args: &LinksArgs) -> Result<ExitCod
     };
     let links = store.readers().links_for(note.id)?;
 
+    // Effective resolution: the stored id, else a live resolve — so a short id
+    // prefix like `[[01KWC654QV]]` follows like `note show`, not dangling.
+    let mut resolved: Vec<Option<NoteId>> = Vec::with_capacity(links.len());
+    for link in &links {
+        resolved.push(store.readers().resolve_link(link)?);
+    }
+
     if args.json {
         let arr: Vec<_> = links
             .iter()
-            .map(|l| {
+            .zip(&resolved)
+            .map(|(l, r)| {
                 serde_json::json!({
                     "target": l.target.to_string(),
                     "display": l.display,
-                    "resolved": l.resolved.map(|id| id.to_string()),
+                    "resolved": r.map(|id| id.to_string()),
                 })
             })
             .collect();
         println!("{}", to_json(&arr)?);
-    } else if links.is_empty() {
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // On a TTY, offer an `fzf` picker over the followable targets (preview is the
+    // target note), then print the chosen one — same UX as an ambiguous ref.
+    if std::io::stdout().is_terminal() {
+        let targets = follow_targets(store, &resolved)?;
+        if !targets.is_empty() {
+            match picker::pick(config, &targets)? {
+                Pick::Chosen(target) => {
+                    render::print_body(&target.body, Mode::from_flags(false, false));
+                    return Ok(ExitCode::SUCCESS);
+                }
+                Pick::Aborted => return Ok(ExitCode::SUCCESS),
+                Pick::NoFzf => {} // fall through to the printed listing
+            }
+        }
+    }
+
+    if links.is_empty() {
         eprintln!("no links");
     } else {
-        for link in &links {
-            let status = link
-                .resolved
-                .map_or_else(|| "(dangling)".to_owned(), short_id);
+        for (link, r) in links.iter().zip(&resolved) {
+            let status = r.map_or_else(|| "(dangling)".to_owned(), short_id);
             println!("[[{link}]]  ->  {status}");
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The unique target notes for the resolved (followable) links, in order — the
+/// candidate set for the `note links` picker.
+fn follow_targets(store: &Store, resolved: &[Option<NoteId>]) -> Result<Vec<Note>> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for id in resolved.iter().flatten() {
+        if seen.insert(*id)
+            && let Some(note) = store.readers().get_note(*id)?
+        {
+            out.push(note);
+        }
+    }
+    Ok(out)
 }
 
 fn cmd_search(store: &Store, args: &SearchArgs) -> Result<ExitCode> {
