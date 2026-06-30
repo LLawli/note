@@ -1,16 +1,17 @@
-# Minimal release pipeline: a `v*.*.*` tag produces a downloadable, checksummed
-# Linux x86_64 binary as a GitHub Release. Deliberately the "minimum" — wider
-# target matrices, macOS signing/notarization, crates.io publishing, and OS
-# packages (Homebrew/AUR/RPM/DEB) are intentionally left as follow-up work.
+# Release pipeline. A `v*.*.*` tag compiles the binary once per target, packages
+# it many ways (tarball/zip + .deb/.rpm) — "compile once, repackage many" — and
+# publishes a GitHub Release with checksums and the CHANGELOG section.
 #
-# Cut a release with:
-#   git tag v0.1.0 && git push origin v0.1.0
+# Cut a release with:  git tag v0.1.0 && git push origin v0.1.0
+# A manual run (workflow_dispatch) builds the matrix only (no release), to test
+# the cross-compiles without side effects.
 
-name: Release
+name: release
 
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -19,34 +20,137 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
-    name: Build & publish (linux x86_64)
-    runs-on: ubuntu-latest
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
     steps:
       - uses: actions/checkout@v5
 
       - name: Install pinned toolchain
         run: rustup show
 
+      - name: Add target
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: rustup target add ${{ matrix.target }}
+
+      # rusqlite bundles SQLite (C), so the Linux ARM cross-build needs a cross
+      # C toolchain + linker; this action wires CC/AR/linker for the target.
+      - name: Cross toolchain (linux arm64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --locked -p note-cli
+        run: cargo build --release --locked --target ${{ matrix.target }} -p note-cli
 
-      - name: Package tarball + checksum
+      - name: Package (unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
         run: |
-          tag="${GITHUB_REF_NAME}"
-          dist="note-${tag}-x86_64-unknown-linux-gnu"
-          mkdir -p "$dist"
-          cp target/release/note "$dist"/
+          dist="note-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$dist"
+          cp "target/${{ matrix.target }}/release/note" "$dist"/
           cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$dist"/
           tar -czf "${dist}.tar.gz" "$dist"
-          sha256sum "${dist}.tar.gz" > "${dist}.tar.gz.sha256"
+          shasum -a 256 "${dist}.tar.gz" > "${dist}.tar.gz.sha256"
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Package (windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          dist="note-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$dist"
+          cp "target/${{ matrix.target }}/release/note.exe" "$dist"/
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$dist"/
+          7z a "${dist}.zip" "$dist" >/dev/null
+          sha256sum "${dist}.zip" > "${dist}.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
         with:
-          files: |
-            note-*.tar.gz
-            note-*.tar.gz.sha256
-          generate_release_notes: true
+          name: ${{ matrix.target }}
+          path: |
+            note-*.tar.gz*
+            note-*.zip*
+
+  # .deb + .rpm for both Linux arches, from the same prebuilt binaries.
+  packages:
+    name: nfpm (deb + rpm)
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*-unknown-linux-gnu"
+          path: dist
+      - name: Install nfpm
+        run: |
+          url=$(curl -sSfL https://api.github.com/repos/goreleaser/nfpm/releases/latest \
+            | grep -o 'https://[^"]*_amd64\.deb' | head -1)
+          curl -sSfL "$url" -o nfpm.deb
+          sudo dpkg -i nfpm.deb
+      - name: Build packages
+        run: |
+          export NFPM_VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p out
+          build() { # rust-arch nfpm-arch
+            local t="$1-unknown-linux-gnu"
+            tar -xzf "dist/${t}/note-${GITHUB_REF_NAME}-${t}.tar.gz"
+            export NFPM_ARCH="$2" NFPM_BIN="note-${GITHUB_REF_NAME}-${t}/note"
+            nfpm package -f packaging/nfpm.yaml -p deb -t out/
+            nfpm package -f packaging/nfpm.yaml -p rpm -t out/
+          }
+          build x86_64 amd64
+          build aarch64 arm64
+          ls -l out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nfpm-packages
+          path: out/*
+
+  release:
+    name: publish GitHub Release
+    needs: [build, packages]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+      - name: Assemble release notes + flatten artifacts
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          mkdir -p release
+          find artifacts -type f \( -name 'note-*' -o -name '*.deb' -o -name '*.rpm' \) -exec cp {} release/ \;
+          # Extract this version's CHANGELOG section (Keep a Changelog).
+          awk -v hdr="## [$ver]" '
+            index($0, hdr) == 1 { flag = 1; next }
+            flag && index($0, "## [") == 1 { exit }
+            flag { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "See [CHANGELOG.md](CHANGELOG.md)." > notes.md
+          {
+            echo
+            echo "### Checksums"
+            echo '```'
+            cat release/*.sha256 2>/dev/null || true
+            echo '```'
+          } >> notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: notes.md
+          files: release/*

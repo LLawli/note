@@ -1,0 +1,18 @@
+# nfpm config for the .deb / .rpm packages (https://nfpm.goreleaser.com).
+# The release workflow sets NFPM_ARCH / NFPM_VERSION / NFPM_BIN per architecture
+# and feeds the SAME prebuilt binary the tarballs use ("compile once, repackage
+# many").
+name: note
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+maintainer: "Luka Kuuhaku <contato@lukakuuhaku.dev>"
+description: |
+  Take notes entirely from the terminal — a Rust CLI + TUI with SQLite
+  full-text search, [[wikilinks]] and tags.
+homepage: "https://github.com/LLawli/note"
+license: "MIT OR Apache-2.0"
+section: utils
+contents:
+  - src: ${NFPM_BIN}
+    dst: /usr/bin/note
