@@ -1,0 +1,61 @@
+# Performance probe over a large corpus built at runtime from RSS feeds (no big
+# fixture in the repo; see crates/note-store/tests/perf.rs). Starts INFORMATIONAL:
+# it prints the numbers but is not a required check and does not assert ceilings.
+# To promote it to a gate, set NOTE_PERF_ENFORCE=1 below (after calibrating the
+# ceilings in perf.rs from real runner numbers) and mark the job required.
+
+name: perf
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+    inputs:
+      n:
+        description: "Corpus size (notes)"
+        default: "1000000"
+      enforce:
+        description: "Assert ceilings (1 = gate, 0 = report-only)"
+        default: "0"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Per-PR / per-push: 50k notes, the three core probes (write, search,
+  # backlinks). Report-only for now.
+  gate:
+    name: perf 50k (informative)
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Perf corpus (50k)
+        env:
+          NOTE_PERF_N: "50000"
+        run: cargo test -p note-store --release --test perf -- --ignored --nocapture
+
+  # Manual heavy run (default 1M notes): adds the resolve_ref / list / reindex
+  # probes. Pass `enforce: 1` to assert the ceilings.
+  full:
+    name: perf full (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Perf corpus (full tier)
+        env:
+          NOTE_PERF_N: ${{ github.event.inputs.n }}
+          NOTE_PERF_FULL: "1"
+          NOTE_PERF_ENFORCE: ${{ github.event.inputs.enforce }}
+        run: cargo test -p note-store --release --test perf -- --ignored --nocapture

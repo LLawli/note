@@ -39,6 +39,25 @@ cargo test --workspace                                  # all green
 `cargo fmt --all` auto-formats. With the git hooks enabled, the first two run
 on every commit and the test suite runs on every push.
 
+### Performance probe
+
+A larger-scale probe lives in `crates/note-store/tests/perf.rs` (and runs in the
+`perf` workflow). It builds a realistic corpus at runtime from RSS feeds
+(`crates/note-store/tests/feeds.json`) — so no big fixture is committed — and
+times the write/search/backlinks/reindex paths. It is `#[ignore]`d (and skips if
+no feed responds), so it never slows the normal suite:
+
+```bash
+# 50k notes, the per-PR probes (report-only):
+cargo test -p note-store --release --test perf -- --ignored --nocapture
+# full tier (resolve_ref / list / reindex), bigger corpus, asserting ceilings:
+NOTE_PERF_N=200000 NOTE_PERF_FULL=1 NOTE_PERF_ENFORCE=1 \
+  cargo test -p note-store --release --test perf -- --ignored --nocapture
+```
+
+It starts informational; the ceilings become a merge gate once calibrated from
+CI-runner numbers.
+
 ## How we work
 
 - **Tests come with the change.** New behavior — especially parsers, id
