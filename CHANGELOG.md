@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The first development cycle toward `0.1.0`. The CLI and TUI are usable; the
-items below describe what is implemented today.
+### Roadmap
+
+- A `crates.io` release so `cargo install note` works.
+- An AUR `-bin` package.
+
+## [0.1.0] - 2026-07-01
+
+The initial release: terminal note-taking (CLI + TUI) over a single SQLite file.
 
 ### Added
 
@@ -48,10 +54,3 @@ items below describe what is implemented today.
   multi-platform prebuilt binaries (Linux x86_64/aarch64, macOS Apple Silicon,
   Windows x86_64), `.deb`/`.rpm` packages, a Homebrew tap formula, and a GitHub
   Release with checksums and the CHANGELOG section.
-
-### Roadmap
-
-- A `crates.io` release so `cargo install note` works.
-- An AUR `-bin` package.
-
-[Unreleased]: https://github.com/LLawli/note/commits/master
