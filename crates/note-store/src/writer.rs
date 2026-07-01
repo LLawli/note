@@ -6,8 +6,8 @@
 use crate::error::{Result, StoreError};
 use crate::mint;
 use crate::model::{ImportNote, ImportOutcome, NewNote, NotePatch};
-use note_core::{Note, NoteId, Tag, Timestamp, WikiLink, WikiTarget};
-use rusqlite::{Connection, Transaction, params};
+use note_core::{ContentKind, Note, NoteId, Tag, Timestamp, WikiLink, WikiTarget};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
@@ -177,6 +177,7 @@ fn reindex(conn: &mut Connection) -> Result<usize> {
 }
 
 fn create(conn: &mut Connection, input: NewNote) -> Result<Note> {
+    ensure_not_empty(input.title.as_deref(), &input.body, input.content_kind)?;
     let now = mint::now();
     let note = Note {
         id: mint::new_id(),
@@ -195,6 +196,7 @@ fn create(conn: &mut Connection, input: NewNote) -> Result<Note> {
 }
 
 fn import(conn: &mut Connection, req: ImportNote) -> Result<(Note, ImportOutcome)> {
+    ensure_not_empty(req.title.as_deref(), &req.body, req.content_kind)?;
     let created = req.created.unwrap_or_else(mint::now);
     let note = Note {
         id: req.id.unwrap_or_else(mint::new_id),
@@ -237,14 +239,18 @@ fn import(conn: &mut Connection, req: ImportNote) -> Result<(Note, ImportOutcome
 }
 
 fn update(conn: &mut Connection, id: NoteId, patch: NotePatch) -> Result<Option<Note>> {
+    ensure_not_empty(patch.title.as_deref(), &patch.body, patch.content_kind)?;
     let tx = conn.transaction()?;
+    // `.optional()?` maps only no-rows to None; a real DB error propagates
+    // instead of masquerading as "note not found" (which would silently drop
+    // the user's edit).
     let created: Option<i64> = tx
         .query_row(
             "SELECT created FROM notes WHERE id = ?1",
             params![id.to_string()],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     let Some(created) = created else {
         return Ok(None);
     };
@@ -275,10 +281,30 @@ fn update(conn: &mut Connection, id: NoteId, patch: NotePatch) -> Result<Option<
 
 fn delete(conn: &mut Connection, id: NoteId) -> Result<bool> {
     let tx = conn.transaction()?;
-    // ON DELETE CASCADE clears tags/links; the AFTER DELETE trigger clears FTS.
-    let n = tx.execute("DELETE FROM notes WHERE id = ?1", params![id.to_string()])?;
+    let id = id.to_string();
+    // ON DELETE CASCADE clears this note's OWN tags/outgoing-links; the AFTER
+    // DELETE trigger clears its FTS row. But inbound links from OTHER notes keep
+    // a stale `resolved_id` (bare TEXT, no FK) pointing at the removed id, so
+    // null them here — otherwise `note links` lists a dead short-id until the
+    // next reindex. (ULIDs are never reused, so a stale id can't mis-resolve.)
+    tx.execute(
+        "UPDATE links SET resolved_id = NULL WHERE resolved_id = ?1",
+        params![id],
+    )?;
+    let n = tx.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
     tx.commit()?;
     Ok(n > 0)
+}
+
+/// Reject a create/update/import that would persist a note with neither a title
+/// nor any body content (invariant 5: this domain rule lives in the store, not
+/// only in the CLI front-end, so every writer path is covered). Empty ⟺ the
+/// effective title derives to nothing (no explicit title, no non-blank body).
+fn ensure_not_empty(title: Option<&str>, body: &str, kind: ContentKind) -> Result<()> {
+    if note_core::derive_title(title, body, kind).trim().is_empty() {
+        return Err(StoreError::EmptyNote);
+    }
+    Ok(())
 }
 
 fn replace_links(conn: &mut Connection, source: NoteId, links: &[WikiLink]) -> Result<()> {

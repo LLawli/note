@@ -108,7 +108,7 @@ impl ReaderPool {
         self.with(|conn| {
             let id: Option<String> = conn
                 .query_row(
-                    "SELECT id FROM notes ORDER BY updated DESC LIMIT 1",
+                    "SELECT id FROM notes ORDER BY updated DESC, id DESC LIMIT 1",
                     [],
                     |r| r.get(0),
                 )
@@ -125,7 +125,7 @@ impl ReaderPool {
         let limit = clamp_i64(limit);
         let offset = clamp_i64(offset);
         self.notes_for(
-            "SELECT id FROM notes ORDER BY updated DESC LIMIT ?1 OFFSET ?2",
+            "SELECT id FROM notes ORDER BY updated DESC, id DESC LIMIT ?1 OFFSET ?2",
             params![limit, offset],
         )
     }
@@ -178,7 +178,7 @@ impl ReaderPool {
             "SELECT n.id FROM notes n
              JOIN tags t ON t.note_id = n.id
              WHERE t.tag = ?1
-             ORDER BY n.updated DESC
+             ORDER BY n.updated DESC, n.id DESC
              LIMIT ?2",
             params![tag.as_str(), limit],
         )
@@ -186,7 +186,7 @@ impl ReaderPool {
 
     /// Every note, ordered most-recently-updated first (powers export).
     pub fn all_notes(&self) -> Result<Vec<Note>> {
-        self.notes_for("SELECT id FROM notes ORDER BY updated DESC", [])
+        self.notes_for("SELECT id FROM notes ORDER BY updated DESC, id DESC", [])
     }
 
     /// Total number of notes (powers `note status`).
@@ -280,7 +280,7 @@ impl ReaderPool {
             "SELECT DISTINCT l.source_id FROM links l
              JOIN notes n ON n.id = l.source_id
              WHERE l.resolved_id = ?1
-             ORDER BY n.updated DESC",
+             ORDER BY n.updated DESC, n.id DESC",
             params![target.to_string()],
         )
     }
@@ -306,6 +306,33 @@ impl ReaderPool {
             WikiTarget::ByTitle(value) => self.resolve_link_target(value),
         }
     }
+
+    /// Resolve many links on a SINGLE pooled connection, preserving input order.
+    /// Avoids the per-link pool checkout (and, for an already-resolved link, the
+    /// wasted note hydration) of calling [`Self::resolve_link`] in a loop.
+    pub fn resolve_links(&self, links: &[Link]) -> Result<Vec<Option<NoteId>>> {
+        self.with(|conn| {
+            links
+                .iter()
+                .map(|link| {
+                    if let Some(id) = link.resolved {
+                        return Ok(Some(id));
+                    }
+                    match &link.target {
+                        WikiTarget::ById(id) => {
+                            let exists: bool = conn.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)",
+                                params![id.to_string()],
+                                |r| r.get(0),
+                            )?;
+                            Ok(exists.then_some(*id))
+                        }
+                        WikiTarget::ByTitle(value) => resolve_link_value(conn, value),
+                    }
+                })
+                .collect()
+        })
+    }
 }
 
 /// Clamp a `usize` count/offset into SQLite's signed `i64` domain.
@@ -315,11 +342,18 @@ fn clamp_i64(n: usize) -> i64 {
 
 /// FTS candidates for `title`, rank-ordered, split into `(exact, all)`: `exact`
 /// are notes whose effective title equals `title` case-insensitively; `all` is
-/// the full rank-ordered candidate set. One scan, the single source of truth for
-/// title matching, shared by `resolve_ref` (reader/pool) and `resolve_title_to_id`
-/// (writer transaction) so they never diverge or double-scan. `ORDER BY rank`
-/// keeps a unique exact-title note from being truncated out by the `LIMIT`.
+/// the rank-ordered candidate set, capped for the ambiguity picker. One scan, the
+/// single source of truth for title matching, shared by `resolve_ref` (reader/pool)
+/// and `resolve_title_to_id` (writer transaction) so they never diverge.
+///
+/// The scan is deliberately UNBOUNDED: a `LIMIT` on the FTS `MATCH` could rank the
+/// one note whose effective title is exactly `needle` below many body-only matches
+/// of a common term and truncate it out, leaving a unique note unresolvable. Only
+/// the `all` fallback list (never `exact`) is capped.
 fn title_candidates(conn: &Connection, title: &str) -> Result<(Vec<NoteId>, Vec<NoteId>)> {
+    /// Cap on the ranked free-text fallback (an ambiguous reference shouldn't
+    /// return thousands of candidates); the exact-title match is never capped.
+    const FALLBACK_CAP: usize = 50;
     let needle = title.trim().to_lowercase();
     if needle.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -327,7 +361,7 @@ fn title_candidates(conn: &Connection, title: &str) -> Result<(Vec<NoteId>, Vec<
     let mut stmt = conn.prepare(
         "SELECT n.id, n.title, n.body, n.content_kind FROM notes_fts f
          JOIN notes n ON n.rowid = f.rowid
-         WHERE notes_fts MATCH ?1 ORDER BY rank LIMIT 50",
+         WHERE notes_fts MATCH ?1 ORDER BY rank",
     )?;
     let rows = stmt.query_map(params![quote_fts(title.trim())], |row| {
         Ok((
@@ -351,7 +385,9 @@ fn title_candidates(conn: &Connection, title: &str) -> Result<(Vec<NoteId>, Vec<
         if effective.to_lowercase() == needle {
             exact.push(nid);
         }
-        all.push(nid);
+        if all.len() < FALLBACK_CAP {
+            all.push(nid);
+        }
     }
     Ok((exact, all))
 }

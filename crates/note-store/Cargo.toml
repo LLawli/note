@@ -17,6 +17,8 @@ ulid = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Integration tests reach for a raw connection to simulate a future-version DB.
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [lints]
 workspace = true

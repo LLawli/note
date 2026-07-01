@@ -75,6 +75,10 @@ impl Drop for Store {
     }
 }
 
+/// Highest migration version this binary embeds. Bump when adding a migration
+/// (a `tests/` guard asserts it matches what refinery has embedded).
+const EMBEDDED_MAX_VERSION: i64 = 1;
+
 fn init_writer_conn(path: &Path) -> Result<Connection> {
     let mut conn = Connection::open(path)?;
     // WAL is persistent at the DB level; foreign_keys is per-connection (also set
@@ -82,6 +86,58 @@ fn init_writer_conn(path: &Path) -> Result<Connection> {
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    embedded::migrations::runner().run(&mut conn)?;
+    refuse_if_newer(&conn)?;
+    // Pin the flags that uphold invariant 13 explicitly rather than relying on
+    // refinery's defaults: an applied-but-absent (future) or divergent migration
+    // must abort, never silently proceed.
+    embedded::migrations::runner()
+        .set_abort_missing(true)
+        .set_abort_divergent(true)
+        .run(&mut conn)?;
     Ok(conn)
+}
+
+/// Invariant 13: refuse to open a DB migrated past what this binary embeds.
+/// Checked before running migrations so a future DB gets an actionable
+/// [`StoreError::DbTooNew`] instead of a cryptic refinery divergence error.
+fn refuse_if_newer(conn: &Connection) -> Result<()> {
+    let has_history: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+         WHERE type = 'table' AND name = 'refinery_schema_history')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_history {
+        return Ok(()); // fresh DB
+    }
+    let found: Option<i64> = conn.query_row(
+        "SELECT MAX(version) FROM refinery_schema_history",
+        [],
+        |r| r.get(0),
+    )?;
+    if let Some(found) = found
+        && found > EMBEDDED_MAX_VERSION
+    {
+        return Err(StoreError::DbTooNew {
+            found,
+            supported: EMBEDDED_MAX_VERSION,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// The hand-maintained `EMBEDDED_MAX_VERSION` must track the migrations
+    /// refinery actually embedded, or invariant-13 checking drifts silently.
+    #[test]
+    fn embedded_max_version_matches_refinery() {
+        let max = super::embedded::migrations::runner()
+            .get_migrations()
+            .iter()
+            .map(refinery::Migration::version)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(i64::from(max), super::EMBEDDED_MAX_VERSION);
+    }
 }

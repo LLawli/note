@@ -3,7 +3,7 @@
 //! and the FTS<->notes desync guard.
 
 use note_core::{ContentKind, NoteId, Tag, Timestamp, WikiLink, WikiTarget};
-use note_store::{ImportNote, ImportOutcome, NewNote, NotePatch, Store};
+use note_store::{ImportNote, ImportOutcome, NewNote, NotePatch, Store, StoreError};
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
@@ -204,6 +204,9 @@ fn list_orders_by_updated_desc() {
     let a = store.writer().create_note(new_note("first", &[])).unwrap();
     let b = store.writer().create_note(new_note("second", &[])).unwrap();
 
+    // Land the touch in a strictly later millisecond so "most recently updated"
+    // is well-defined and not a same-ms tie broken by the id tiebreaker.
+    std::thread::sleep(std::time::Duration::from_millis(2));
     // touch `a` so it becomes most-recent
     let patch = NotePatch {
         title: None,
@@ -670,4 +673,158 @@ fn reindex_resolves_dangling_links_and_feeds_backlinks() {
 
     // Reindex is idempotent: a second pass changes nothing.
     assert_eq!(store.writer().reindex().unwrap(), 0);
+}
+
+#[test]
+fn exact_title_resolves_past_a_common_fts_term_cap() {
+    let (store, _dir) = tmp_store();
+    // 60 notes whose bodies all FTS-match "meeting" but whose effective titles
+    // (first line) are NOT "meeting" — enough to overflow the old LIMIT 50.
+    for i in 0..60 {
+        store
+            .writer()
+            .create_note(new_note(&format!("meeting agenda item number {i}"), &[]))
+            .unwrap();
+    }
+    // One note whose effective title is exactly "Meeting".
+    let target = store
+        .writer()
+        .create_note(NewNote {
+            title: Some("Meeting".to_owned()),
+            body: "unrelated body".to_owned(),
+            content_kind: ContentKind::Markdown,
+            tags: BTreeSet::new(),
+            links: Vec::new(),
+        })
+        .unwrap();
+
+    // The unique exact-title note must be found, not drowned by ranked body
+    // matches and truncated out (M1).
+    let hits = store.readers().resolve_ref("meeting").unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, target.id);
+    assert_eq!(
+        store.readers().resolve_link_target("meeting").unwrap(),
+        Some(target.id)
+    );
+}
+
+#[test]
+fn deleting_a_link_target_degrades_the_source_link_to_dangling() {
+    let (store, _dir) = tmp_store();
+    let target = store
+        .writer()
+        .create_note(new_note("# Target\nx", &[]))
+        .unwrap();
+    let source = store
+        .writer()
+        .create_note(NewNote {
+            title: None,
+            body: "see [[Target]]".to_owned(),
+            content_kind: ContentKind::Markdown,
+            tags: BTreeSet::new(),
+            links: link_by_title("Target"),
+        })
+        .unwrap();
+    assert_eq!(
+        store.readers().links_for(source.id).unwrap()[0].resolved,
+        Some(target.id)
+    );
+
+    // Deleting the target nulls the inbound link's stale resolved_id (L4).
+    store.writer().delete_note(target.id).unwrap();
+    let link = store.readers().links_for(source.id).unwrap().remove(0);
+    assert_eq!(link.resolved, None);
+}
+
+#[test]
+fn deleting_a_note_cascades_its_tags() {
+    let (store, _dir) = tmp_store();
+    let n = store
+        .writer()
+        .create_note(new_note("# Tagged\nx", &["alpha", "beta"]))
+        .unwrap();
+    assert_eq!(store.readers().all_tags().unwrap().len(), 2);
+    store.writer().delete_note(n.id).unwrap();
+    assert!(store.readers().all_tags().unwrap().is_empty());
+}
+
+#[test]
+fn reimport_with_changed_body_reindexes_fts() {
+    let (store, _dir) = tmp_store();
+    let id = NoteId::from_str("01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap();
+    let mut req = ImportNote {
+        id: Some(id),
+        title: None,
+        body: "alpha original".to_owned(),
+        content_kind: ContentKind::Markdown,
+        tags: BTreeSet::new(),
+        created: Some(Timestamp::from_unix_millis(1)),
+        updated: Some(Timestamp::from_unix_millis(1)),
+        links: Vec::new(),
+    };
+    store.writer().import_note(req.clone()).unwrap();
+    assert_eq!(store.readers().search("alpha", 10).unwrap().len(), 1);
+
+    // Re-importing the SAME id with a CHANGED body must fire notes_au and
+    // reindex FTS: the old term is gone, the new one is found (L8).
+    req.body = "beta rewritten".to_owned();
+    let (_, outcome) = store.writer().import_note(req).unwrap();
+    assert_eq!(outcome, ImportOutcome::Updated);
+    assert_eq!(store.readers().search("alpha", 10).unwrap().len(), 0);
+    assert_eq!(store.readers().search("beta", 10).unwrap().len(), 1);
+}
+
+#[test]
+fn store_refuses_an_empty_note() {
+    let (store, _dir) = tmp_store();
+    let empty = NewNote {
+        title: None,
+        body: "   \n\t".to_owned(),
+        content_kind: ContentKind::Markdown,
+        tags: BTreeSet::new(),
+        links: Vec::new(),
+    };
+    assert!(matches!(
+        store.writer().create_note(empty),
+        Err(StoreError::EmptyNote)
+    ));
+    // A note with only a title (no body) is legitimate (L15).
+    assert!(
+        store
+            .writer()
+            .create_note(NewNote {
+                title: Some("Just a title".to_owned()),
+                body: String::new(),
+                content_kind: ContentKind::Markdown,
+                tags: BTreeSet::new(),
+                links: Vec::new(),
+            })
+            .is_ok()
+    );
+}
+
+#[test]
+fn open_refuses_a_db_newer_than_this_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notes.sqlite");
+    drop(Store::open(&path).unwrap()); // migrate to the current version
+    // Simulate a future `note` having applied a V2 migration.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO refinery_schema_history (version, name, applied_on, checksum)
+             VALUES (2, 'future', '2099-01-01T00:00:00', '0')",
+            [],
+        )
+        .unwrap();
+    }
+    let err = Store::open(&path).unwrap_err();
+    assert!(matches!(
+        err,
+        StoreError::DbTooNew {
+            found: 2,
+            supported: 1
+        }
+    ));
 }
