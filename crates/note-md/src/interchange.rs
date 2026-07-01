@@ -16,6 +16,7 @@
 //! [`Note`]. Both round-trip: `to_* ∘ from_*` reproduces the same logical note.
 
 use note_core::{ContentKind, Note, NoteId, Tag, Timestamp};
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::str::FromStr;
@@ -55,7 +56,11 @@ pub fn to_markdown(note: &Note) -> String {
     let mut out = String::from("---\n");
     let _ = writeln!(out, "id: {}", note.id);
     if let Some(title) = &note.title {
-        let _ = writeln!(out, "title: {title}");
+        // A newline in a scalar would either break re-parsing (a continuation
+        // line has no `key:`) or, worse, an injected `\n---\n` would silently
+        // truncate the frontmatter. Collapse interior newlines so the block
+        // always round-trips (invariant 8).
+        let _ = writeln!(out, "title: {}", frontmatter_scalar(title));
     }
     if !note.tags.is_empty() {
         let tags = note
@@ -76,7 +81,10 @@ pub fn to_markdown(note: &Note) -> String {
 
 /// Parse a `.md` file (optionally with frontmatter) into an [`ImportedNote`].
 pub fn from_markdown(text: &str) -> Result<ImportedNote, MdError> {
-    let (frontmatter, body) = split_frontmatter(text);
+    // Frontmatter detection keys off LF fences; a CRLF (or lone-CR) file would
+    // otherwise read as "no frontmatter" and lose id/tags/timestamps.
+    let text = normalize_newlines(text);
+    let (frontmatter, body) = split_frontmatter(&text);
     let mut note = ImportedNote {
         id: None,
         title: None,
@@ -133,7 +141,10 @@ fn parse_ts(value: &str, field: &str) -> Result<Timestamp, MdError> {
 }
 
 /// Split leading `---\n … \n---\n` frontmatter from the body. Returns
-/// `(None, full_text)` when there is no complete frontmatter block.
+/// `(None, full_text)` when there is no complete frontmatter block, or when the
+/// leading `---…---` block is prose (a thematic break / Setext layout) rather
+/// than `key: value` lines — so arbitrary markdown that happens to open with a
+/// horizontal rule imports as body instead of erroring.
 fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
     let Some(rest) = text.strip_prefix("---\n") else {
         return (None, text);
@@ -146,12 +157,47 @@ fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
         return (Some(""), "");
     }
     if let Some(end) = rest.find("\n---\n") {
-        return (Some(&rest[..end]), &rest[end + 5..]);
+        let fm = &rest[..end];
+        if looks_like_frontmatter(fm) {
+            return (Some(fm), &rest[end + 5..]);
+        }
+        return (None, text);
     }
     if let Some(stripped) = rest.strip_suffix("\n---") {
-        return (Some(stripped), "");
+        if looks_like_frontmatter(stripped) {
+            return (Some(stripped), "");
+        }
+        return (None, text);
     }
     (None, text)
+}
+
+/// A candidate frontmatter block is real only if every non-blank line is a
+/// `key: value` pair; a colon-less prose line means it was two horizontal rules.
+fn looks_like_frontmatter(block: &str) -> bool {
+    block
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .all(|l| l.contains(':'))
+}
+
+/// Normalize CRLF and lone-CR line endings to LF (borrow when already clean).
+fn normalize_newlines(text: &str) -> Cow<'_, str> {
+    if text.contains('\r') {
+        Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+/// Flatten interior newlines in a frontmatter scalar to spaces so the emitted
+/// `key: value` line stays single-line and re-parses losslessly.
+fn frontmatter_scalar(value: &str) -> Cow<'_, str> {
+    if value.contains('\n') || value.contains('\r') {
+        Cow::Owned(value.replace(['\r', '\n'], " "))
+    } else {
+        Cow::Borrowed(value)
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +277,62 @@ mod tests {
         let json = to_json(&note).unwrap();
         let back = from_json(&json).unwrap();
         assert_eq!(note, back);
+    }
+
+    #[test]
+    fn crlf_frontmatter_is_parsed_not_swallowed() {
+        let md = "---\r\ntitle: T\r\ntags: a, b\r\ncontent_kind: plain\r\ncreated: 5\r\nupdated: 9\r\n---\r\nbody\r\nline";
+        let parsed = from_markdown(md).unwrap();
+        assert_eq!(parsed.title.as_deref(), Some("T"));
+        assert_eq!(parsed.tags.len(), 2);
+        assert_eq!(parsed.content_kind, ContentKind::Plain);
+        assert_eq!(parsed.created, Some(Timestamp::from_unix_millis(5)));
+        assert_eq!(parsed.updated, Some(Timestamp::from_unix_millis(9)));
+        assert_eq!(parsed.body, "body\nline");
+    }
+
+    #[test]
+    fn title_with_newline_roundtrips_and_keeps_metadata() {
+        let id = NoteId::from_parts(7, 7);
+        let mut note = Note::new(
+            id,
+            "body",
+            ContentKind::Plain,
+            Timestamp::from_unix_millis(11),
+            Timestamp::from_unix_millis(22),
+        );
+        note.title = Some("line one\nline two".to_owned());
+        let parsed = from_markdown(&to_markdown(&note)).unwrap();
+        assert_eq!(parsed.title.as_deref(), Some("line one line two"));
+        assert_eq!(parsed.content_kind, ContentKind::Plain);
+        assert_eq!(parsed.created, Some(Timestamp::from_unix_millis(11)));
+        assert_eq!(parsed.updated, Some(Timestamp::from_unix_millis(22)));
+    }
+
+    #[test]
+    fn title_with_divider_does_not_truncate_frontmatter() {
+        let id = NoteId::from_parts(8, 8);
+        let mut note = Note::new(
+            id,
+            "body",
+            ContentKind::Plain,
+            Timestamp::from_unix_millis(1),
+            Timestamp::from_unix_millis(2),
+        );
+        note.title = Some("a\n---".to_owned());
+        let parsed = from_markdown(&to_markdown(&note)).unwrap();
+        assert_eq!(parsed.title.as_deref(), Some("a ---"));
+        assert_eq!(parsed.created, Some(Timestamp::from_unix_millis(1)));
+        assert_eq!(parsed.updated, Some(Timestamp::from_unix_millis(2)));
+        assert_eq!(parsed.body, "body");
+    }
+
+    #[test]
+    fn leading_rule_block_of_prose_is_body_not_frontmatter() {
+        let text = "---\nprose with no colon\n---\nmore body";
+        let parsed = from_markdown(text).unwrap();
+        assert_eq!(parsed.id, None);
+        assert_eq!(parsed.body, text);
     }
 
     #[test]

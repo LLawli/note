@@ -2,12 +2,26 @@ use core::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Whether a note's body is interpreted as plain text or markdown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ContentKind {
     Plain,
     #[default]
     Markdown,
+}
+
+impl<'de> Deserialize<'de> for ContentKind {
+    /// Decode through the shared, lenient wire vocabulary so JSON matches
+    /// note-md's frontmatter parse: an unknown or future tag degrades to the
+    /// [`Markdown`](Self::Markdown) default instead of hard-erroring (which the
+    /// derived `rename_all` impl would do). Mirrors `NoteId`/`Tag`.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::from_wire(&s))
+    }
 }
 
 impl ContentKind {
@@ -82,5 +96,15 @@ mod tests {
         );
         let back: ContentKind = serde_json::from_str("\"markdown\"").unwrap();
         assert_eq!(back, ContentKind::Markdown);
+    }
+
+    #[test]
+    fn contentkind_deserialize_is_lenient_like_from_wire() {
+        // Unknown/future tags must NOT hard-error on the serde path (they don't
+        // on the note-md frontmatter path); both share `from_wire`.
+        let plain: ContentKind = serde_json::from_str("\"plain\"").unwrap();
+        assert_eq!(plain, ContentKind::Plain);
+        let unknown: ContentKind = serde_json::from_str("\"future-kind\"").unwrap();
+        assert_eq!(unknown, ContentKind::Markdown);
     }
 }
