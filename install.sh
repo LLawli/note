@@ -22,7 +22,9 @@ have curl || die "curl is required"
 latest_tag() {
   resp="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest")" \
     || die "cannot reach the GitHub API"
-  printf '%s\n' "$resp" | grep '"tag_name"' | head -1 | cut -d'"' -f4
+  # Isolate the tag_name field first: the API may return minified JSON on one
+  # line, where a blind `cut -f4` would grab the first string value (`url`).
+  printf '%s\n' "$resp" | grep -o '"tag_name"[^,]*' | head -1 | cut -d'"' -f4
 }
 
 # Rust target triple for the prebuilt tarballs (empty = unsupported here).
@@ -72,10 +74,10 @@ if [ "$os" = "Linux" ] && [ -r /etc/os-release ]; then
   esac
 fi
 
-# 3. mise (downloads the prebuilt binary from the release via the ubi backend).
+# 3. mise (downloads the prebuilt binary from the release via the github backend).
 if have mise; then
-  say "mise (ubi:$REPO)"
-  exec mise use -g "ubi:$REPO"
+  say "mise (github:$REPO)"
+  exec mise use -g "github:$REPO"
 fi
 
 # 4. cargo (build from source). --force reinstalls over an older version.

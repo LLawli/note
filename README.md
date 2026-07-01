@@ -89,10 +89,10 @@ sudo rpm -U  note-*.x86_64.rpm    # Fedora / RHEL
 ### mise
 
 [mise](https://mise.jdx.dev) fetches the prebuilt binary straight from the
-release (via its `ubi` backend) and keeps it up to date:
+release (via its `github` backend) and keeps it up to date:
 
 ```bash
-mise use -g ubi:LLawli/note
+mise use -g github:LLawli/note
 ```
 
 ### From source (Rust toolchain)
