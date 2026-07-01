@@ -88,7 +88,7 @@ jobs:
   # .deb + .rpm for both Linux arches, from the same prebuilt binaries.
   packages:
     name: nfpm (deb + rpm)
-    needs: build
+    needs: [build, release]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -103,28 +103,30 @@ jobs:
             | grep -o 'https://[^"]*_amd64\.deb' | head -1)
           curl -sSfL "$url" -o nfpm.deb
           sudo dpkg -i nfpm.deb
-      - name: Build packages
+      - name: Build packages and attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          sudo apt-get update && sudo apt-get install -y gettext-base
           export NFPM_VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p out
           build() { # rust-arch nfpm-arch
             local t="$1-unknown-linux-gnu"
             tar -xzf "dist/${t}/note-${GITHUB_REF_NAME}-${t}.tar.gz"
             export NFPM_ARCH="$2" NFPM_BIN="note-${GITHUB_REF_NAME}-${t}/note"
-            nfpm package -f packaging/nfpm.yaml -p deb -t out/
-            nfpm package -f packaging/nfpm.yaml -p rpm -t out/
+            # nfpm doesn't env-expand `contents.src`, so render the config first.
+            envsubst < packaging/nfpm.yaml.tmpl > nfpm.yaml
+            nfpm package -f nfpm.yaml -p deb -t out/
+            nfpm package -f nfpm.yaml -p rpm -t out/
           }
           build x86_64 amd64
           build aarch64 arm64
           ls -l out/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: nfpm-packages
-          path: out/*
+          gh release upload "$GITHUB_REF_NAME" out/*.deb out/*.rpm --clobber
 
   release:
     name: publish GitHub Release
-    needs: [build, packages]
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -161,7 +163,7 @@ jobs:
   # `HOMEBREW_TAP_DEPLOY_KEY` secret. (To disable, unset the variable.)
   homebrew:
     name: update Homebrew tap
-    needs: build
+    needs: [build, release]
     if: startsWith(github.ref, 'refs/tags/') && vars.HOMEBREW_TAP == 'true'
     runs-on: ubuntu-latest
     steps:
