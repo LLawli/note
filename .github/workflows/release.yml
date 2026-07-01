@@ -183,6 +183,10 @@ jobs:
           export SHA_LINUX_X64="$(sha x86_64-unknown-linux-gnu)"
           export URL_LINUX_ARM="${base}/note-${GITHUB_REF_NAME}-aarch64-unknown-linux-gnu.tar.gz"
           export SHA_LINUX_ARM="$(sha aarch64-unknown-linux-gnu)"
+          # Intel macOS has no prebuilt binary: the formula builds from the source
+          # tarball, so publish its URL + checksum too.
+          export URL_SRC="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          export SHA_SRC="$(curl -fsSL "$URL_SRC" | sha256sum | cut -d' ' -f1)"
           envsubst < packaging/note.rb.tmpl > note.rb
           cat note.rb
       - name: Push to the tap
@@ -192,7 +196,9 @@ jobs:
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/tap_key
           chmod 600 ~/.ssh/tap_key
-          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          # Pin GitHub's published ed25519 host key instead of trust-on-first-use
+          # `ssh-keyscan` (which would accept whatever a MITM offered at runtime).
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' >> ~/.ssh/known_hosts
           export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes"
           git clone "git@github.com:${GITHUB_REPOSITORY_OWNER}/homebrew-tap.git" tap
           install -D note.rb tap/Formula/note.rb
