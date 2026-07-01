@@ -23,6 +23,18 @@ use std::io::{self, stdout};
 /// restores the terminal before returning. The returned [`Outcome`] tells the
 /// caller whether the user quit or asked to edit a note.
 pub fn run(store: &Store) -> io::Result<Outcome> {
+    // Snapshot the process panic hook and reinstall it on exit. Both
+    // `ratatui::try_init` and `enable_mouse` chain a new hook; without restoring,
+    // re-entering the TUI after each `$EDITOR` edit would stack hooks that never
+    // unwind (and a stale mouse/altscreen-disabling hook would fire on a later
+    // CLI panic against a terminal not in that state).
+    let original_hook = std::panic::take_hook();
+    let result = run_inner(store);
+    std::panic::set_hook(original_hook);
+    result
+}
+
+fn run_inner(store: &Store) -> io::Result<Outcome> {
     let mut terminal = ratatui::try_init()?;
     enable_mouse();
     let outcome = event_loop(store, &mut terminal);

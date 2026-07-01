@@ -23,10 +23,17 @@ pub fn capture_body(config: &Config, initial: &str) -> Result<String> {
     file.flush().ok();
     let path = file.path().to_owned();
 
-    let mut parts = editor.split_whitespace();
-    let program = parts.next().context("empty editor command")?;
-    let status = Command::new(program)
-        .args(parts)
+    // POSIX-style word splitting (honors quotes) so an editor whose path has a
+    // space or that needs a quoted argument parses correctly, e.g.
+    // `"/opt/My Editor/edit" --wait` — not mis-split like `split_whitespace`.
+    let mut parts = shlex::split(editor)
+        .with_context(|| format!("could not parse editor command {editor:?}"))?;
+    if parts.is_empty() {
+        bail!("empty editor command");
+    }
+    let program = parts.remove(0);
+    let status = Command::new(&program)
+        .args(&parts)
         .arg(&path)
         .status()
         .with_context(|| format!("launching editor {editor:?}"))?;

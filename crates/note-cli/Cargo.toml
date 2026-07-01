@@ -24,6 +24,8 @@ directories = "6"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = "3"
+# POSIX word-splitting for the $EDITOR/$VISUAL command (quotes, spaced paths).
+shlex = "1"
 
 [dev-dependencies]
 assert_cmd = "2"
