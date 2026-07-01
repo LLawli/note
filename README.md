@@ -45,8 +45,19 @@ and is trivial to script.
 ## Install
 
 `note` is a single self-contained binary. Prebuilt binaries and packages are
-published per [release](https://github.com/LLawli/note/releases); until the first
-tagged release, build from source (the last option works today).
+published per [release](https://github.com/LLawli/note/releases).
+
+### One-line install / update (picks the best method)
+
+Runs anywhere and installs via the most appropriate route it finds — Homebrew,
+your distro's `.deb`/`.rpm`, `mise`, `cargo`, or a prebuilt binary, in that
+order. **Re-run it to update** — every route installs-or-upgrades in place:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LLawli/note/master/install.sh | sh
+```
+
+Prefer a specific method? Pick one below.
 
 ### Prebuilt binary
 
@@ -72,7 +83,16 @@ Grab the `.deb` or `.rpm` from the release and install it:
 
 ```bash
 sudo dpkg -i note_*_amd64.deb     # Debian / Ubuntu
-sudo rpm -i  note-*.x86_64.rpm    # Fedora / RHEL
+sudo rpm -U  note-*.x86_64.rpm    # Fedora / RHEL
+```
+
+### mise
+
+[mise](https://mise.jdx.dev) fetches the prebuilt binary straight from the
+release (via its `ubi` backend) and keeps it up to date:
+
+```bash
+mise use -g ubi:LLawli/note
 ```
 
 ### From source (Rust toolchain)
