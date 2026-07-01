@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Roadmap
+
+- A `crates.io` release so `cargo install note` works.
+- An AUR `-bin` package.
+
+## [0.1.1] - 2026-07-01
+
+Hardening release: fixes from a whole-codebase review (no API changes).
+
 ### Fixed
 
 - Exact-title and `[[wikilink]]` resolution is deterministic again: a note whose
@@ -29,11 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   errors in every screen, and can't overflow the scroll offset.
 - `install.sh` verifies the download checksum, pins the release tag for the
   `cargo` path, and (like the Homebrew tap) builds from source on Intel macOS.
-
-### Roadmap
-
-- A `crates.io` release so `cargo install note` works.
-- An AUR `-bin` package.
 
 ## [0.1.0] - 2026-07-01
 

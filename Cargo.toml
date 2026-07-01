@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
@@ -21,11 +21,11 @@ keywords = ["notes", "cli", "tui", "sqlite", "zettelkasten"]
 categories = ["command-line-utilities", "text-editors"]
 
 [workspace.dependencies]
-note-core = { path = "crates/note-core", version = "0.1.0" }
-note-store = { path = "crates/note-store", version = "0.1.0" }
-note-md = { path = "crates/note-md", version = "0.1.0" }
-note-tui = { path = "crates/note-tui", version = "0.1.0" }
-note-cli = { path = "crates/note-cli", version = "0.1.0" }
+note-core = { path = "crates/note-core", version = "0.1.1" }
+note-store = { path = "crates/note-store", version = "0.1.1" }
+note-md = { path = "crates/note-md", version = "0.1.1" }
+note-tui = { path = "crates/note-tui", version = "0.1.1" }
+note-cli = { path = "crates/note-cli", version = "0.1.1" }
 
 # default-features=false => no std/rand/getrandom => no ambient Ulid::new()/clock in core.
 # This blocks ambient ctors only while M0 is the sole ulid consumer; M1+ feature
