@@ -181,13 +181,21 @@ fn cmd_export(store: &Store, args: &ExportArgs) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Write `content` to `path` atomically: a sibling temp file, then rename.
+/// Write `content` to `path` atomically: a randomized temp file in the same
+/// directory, then rename. `NamedTempFile` gives an `O_EXCL` unpredictable name
+/// (no fixed-`.tmp` symlink/TOCTOU or concurrent-export clash) and is cleaned up
+/// on drop if the rename never happens.
 fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
-    std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("finalizing {}", path.display()))?;
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let mut tmp = match dir {
+        Some(dir) => tempfile::NamedTempFile::new_in(dir),
+        None => tempfile::NamedTempFile::new(),
+    }
+    .with_context(|| format!("creating temp file for {}", path.display()))?;
+    tmp.write_all(content.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    tmp.persist(path)
+        .with_context(|| format!("finalizing {}", path.display()))?;
     Ok(())
 }
 
@@ -368,22 +376,37 @@ fn cmd_edit(store: &Store, config: &Config, args: EditArgs) -> Result<ExitCode> 
     let metadata_only =
         args.title.is_some() || !args.tags.is_empty() || args.plain || args.markdown;
 
-    // Body source: --message, then (for metadata-only edits) keep the body,
-    // then piped stdin, then the editor pre-filled with the current body.
-    let body = if let Some(message) = &args.message {
-        message.clone()
+    // Body source: --message, then (for metadata-only edits) keep the existing
+    // body, then piped stdin, then the editor pre-filled with the current body.
+    // `None` means "keep whatever the freshly re-read note has".
+    let new_body: Option<String> = if let Some(message) = &args.message {
+        Some(message.clone())
     } else if metadata_only {
-        current.body.clone()
+        None
     } else if !std::io::stdin().is_terminal() {
-        read_stdin()?
+        Some(read_stdin()?)
     } else {
-        editor::capture_body(config, &current.body)?
+        Some(editor::capture_body(config, &current.body)?)
     };
-    let body = body.trim_end().to_owned();
+
+    // Re-read after a possibly-long editor session so a concurrent change (e.g.
+    // `note tag` in another terminal while $EDITOR was open) is not clobbered:
+    // metadata comes from the fresh note unless a CLI flag overrides it, and the
+    // body is kept fresh too unless this edit supplied a new one. (Mirrors
+    // `edit_note_in_editor`, which already re-reads.)
+    let fresh = store
+        .readers()
+        .get_note(current.id)?
+        .context("note vanished before it could be updated")?;
+
+    let body = match new_body {
+        Some(b) => b.trim_end().to_owned(),
+        None => fresh.body.clone(),
+    };
 
     let title = match args.title {
         Some(t) => normalize_title(Some(t)),
-        None => current.title.clone(),
+        None => fresh.title.clone(),
     };
 
     let content_kind = if args.plain {
@@ -391,11 +414,11 @@ fn cmd_edit(store: &Store, config: &Config, args: EditArgs) -> Result<ExitCode> 
     } else if args.markdown {
         ContentKind::Markdown
     } else {
-        current.content_kind
+        fresh.content_kind
     };
 
     let tags = if args.tags.is_empty() {
-        current.tags.clone()
+        fresh.tags.clone()
     } else {
         parse_tags(&args.tags)?
     };
@@ -436,11 +459,9 @@ fn cmd_links(store: &Store, config: &Config, args: &LinksArgs) -> Result<ExitCod
     let links = store.readers().links_for(note.id)?;
 
     // Effective resolution: the stored id, else a live resolve — so a short id
-    // prefix like `[[01KWC654QV]]` follows like `note show`, not dangling.
-    let mut resolved: Vec<Option<NoteId>> = Vec::with_capacity(links.len());
-    for link in &links {
-        resolved.push(store.readers().resolve_link(link)?);
-    }
+    // prefix like `[[01KWC654QV]]` follows like `note show`, not dangling. One
+    // pooled connection for the whole batch (not a checkout per link).
+    let resolved = store.readers().resolve_links(&links)?;
 
     if args.json {
         let arr: Vec<_> = links

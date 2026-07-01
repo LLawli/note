@@ -42,6 +42,16 @@ impl Config {
         if let Some(dir) = data_dir_override {
             cfg.data_dir = dir;
         }
+        // Absolutize a relative data dir (from --data-dir / NOTE_DATA_DIR / toml)
+        // against the cwd, so `note` targets the SAME database no matter which
+        // directory it is invoked from (invariant 11: an absolute data dir). The
+        // platform default is already absolute; the resolved path is surfaced by
+        // `note status`.
+        if cfg.data_dir.is_relative()
+            && let Ok(cwd) = std::env::current_dir()
+        {
+            cfg.data_dir = cwd.join(&cfg.data_dir);
+        }
         if cfg.editor.is_none() {
             cfg.editor = env_nonempty("VISUAL").or_else(|| env_nonempty("EDITOR"));
         }

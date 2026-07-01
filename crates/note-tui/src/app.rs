@@ -197,8 +197,10 @@ impl<'a> App<'a> {
     /// Map a left-click at `(col, row)` to an open/follow message for the current
     /// mode, or `None` when it misses an interactive row.
     fn hit_test(&self, col: u16, row: u16, size: Size) -> Option<Msg> {
-        // Ignore the 1-row footer and the bordered block's edge columns.
-        if size.height == 0 || row + 1 >= size.height || col == 0 || col + 1 >= size.width {
+        // Ignore the 1-row footer, the bordered block's bottom-border row (row
+        // `height - 2`, which otherwise maps to the first item clipped below the
+        // viewport), and its edge columns.
+        if size.height == 0 || row + 2 >= size.height || col == 0 || col + 1 >= size.width {
             return None;
         }
         match self.mode {
@@ -250,6 +252,7 @@ impl<'a> App<'a> {
     /// `self` and run alongside the field writes.
     fn build_links(&mut self) {
         self.link_selected = 0;
+        self.status.clear();
         let Some(id) = self.viewed().map(|n| n.id) else {
             self.links.clear();
             return;
@@ -258,8 +261,10 @@ impl<'a> App<'a> {
         let mut rows = Vec::new();
         match readers.links_for(id) {
             Ok(out) => {
-                for link in &out {
-                    let target = readers.resolve_link(link).ok().flatten();
+                // Resolve every link's target on ONE pooled connection instead of
+                // a checkout (+ FTS scan) per link.
+                let targets = readers.resolve_links(&out).unwrap_or_default();
+                for (link, target) in out.iter().zip(targets) {
                     let label = match target.and_then(|t| readers.get_note(t).ok().flatten()) {
                         Some(n) => format!("→ {}", n.display_title()),
                         None => format!("→ {} (dangling)", link.target),
@@ -322,9 +327,10 @@ impl<'a> App<'a> {
         self.clamp_selection();
     }
 
-    /// Upper bound for the View-mode scroll offset: the body's line count, so
-    /// scrolling cannot run off into blank space past the note. Approximate
-    /// (ignores wrapping) but bounded, which is the point.
+    /// Upper bound for the View-mode scroll offset: the body's line count. An
+    /// APPROXIMATE bound (it ignores soft-wrapping, so a long-line note may scroll
+    /// a little past its wrapped end, and a short note stops before trailing blank
+    /// space) — the point is that it is bounded and the clamp cannot overflow.
     fn max_scroll(&self) -> u16 {
         self.viewed().map_or(0, |n| {
             u16::try_from(n.body.lines().count()).unwrap_or(u16::MAX)
@@ -358,7 +364,7 @@ impl Model for App<'_> {
                 _ => self.selected = self.selected.saturating_sub(1),
             },
             Msg::Down => match self.mode {
-                Mode::View => self.scroll = (self.scroll + 1).min(self.max_scroll()),
+                Mode::View => self.scroll = self.scroll.saturating_add(1).min(self.max_scroll()),
                 Mode::Links => {
                     let max = self.links.len().saturating_sub(1);
                     self.link_selected = (self.link_selected + 1).min(max);
@@ -472,11 +478,25 @@ impl Model for App<'_> {
             }
         }
 
-        frame.render_widget(Paragraph::new(self.footer_help()), footer);
+        frame.render_widget(Paragraph::new(self.footer_line()), footer);
     }
 }
 
 impl App<'_> {
+    /// Footer content: a store-read error takes precedence over the help hints so
+    /// a failed reload/search/links read is visible in every mode (not silently
+    /// shown as an empty list indistinguishable from an empty database).
+    fn footer_line(&self) -> Line<'_> {
+        if self.status.is_empty() {
+            self.footer_help()
+        } else {
+            Line::from(Span::styled(
+                self.status.clone(),
+                Style::new().fg(Color::Red),
+            ))
+        }
+    }
+
     fn footer_help(&self) -> Line<'_> {
         match self.mode {
             Mode::List => self.theme.help_line([
@@ -1106,5 +1126,31 @@ mod tests {
         app.update(Msg::Open);
         app.update(Msg::OpenLinks);
         assert_eq!(app.map_mouse(click(3, 1), size), Some(Msg::FollowAt(0)));
+    }
+
+    #[test]
+    fn clicking_the_block_bottom_border_is_not_a_hidden_row() {
+        // More notes than the viewport can show, so a row past the inner area
+        // maps to a clipped (hidden) note if the bottom border isn't rejected.
+        let titles: Vec<String> = (0..12).map(|i| format!("n{i}")).collect();
+        let refs: Vec<&str> = titles.iter().map(String::as_str).collect();
+        let (store, _d) = store_with(&refs);
+        let app = loaded(&store);
+        let size = Size::new(40, 12); // main = rows 0..=10; block bottom border = row 10
+        // The bottom border row is not an interactive note row.
+        assert_eq!(app.map_mouse(click(3, 10), size), None);
+        // The last visible content row still opens its note.
+        assert_eq!(app.map_mouse(click(3, 9), size), Some(Msg::OpenAt(8)));
+    }
+
+    #[test]
+    fn view_scroll_clamps_and_never_overflows() {
+        let (store, _d) = store_with(&["a"]); // short body -> small max_scroll
+        let mut app = loaded(&store);
+        app.update(Msg::Open);
+        for _ in 0..u16::from(u8::MAX) {
+            app.update(Msg::Down);
+        }
+        assert!(app.scroll <= app.max_scroll());
     }
 }

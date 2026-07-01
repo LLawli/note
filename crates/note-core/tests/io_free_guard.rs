@@ -12,6 +12,11 @@ const FORBIDDEN: &[&str] = &[
     "std::time",
     "std::fs",
     "std::net",
+    "std::env",
+    "env::var",
+    "rand::",
+    "getrandom",
+    "thread_rng",
 ];
 
 #[test]
@@ -35,8 +40,11 @@ fn core_is_io_and_ambient_free() {
                 if t.starts_with("//") || t.starts_with('*') {
                     continue; // skip comments / doc lines
                 }
+                // Only scan the code portion: a needle mentioned in a trailing
+                // comment (e.g. `// resets SystemTime`) must not fail the guard.
+                let code = line.split_once("//").map_or(line, |(before, _)| before);
                 for needle in FORBIDDEN {
-                    if line.contains(needle) {
+                    if code.contains(needle) {
                         offenders.push(format!("{}:{}: {needle}", path.display(), n + 1));
                     }
                 }

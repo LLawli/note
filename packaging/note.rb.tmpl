@@ -5,8 +5,16 @@ class Note < Formula
   license "MIT OR Apache-2.0"
 
   on_macos do
-    url "${URL_MAC}"
-    sha256 "${SHA_MAC}"
+    on_arm do
+      url "${URL_MAC}"
+      sha256 "${SHA_MAC}"
+    end
+    on_intel do
+      # No prebuilt Intel-macOS binary is published — build from source.
+      url "${URL_SRC}"
+      sha256 "${SHA_SRC}"
+      depends_on "rust" => :build
+    end
   end
 
   on_linux do
@@ -21,7 +29,11 @@ class Note < Formula
   end
 
   def install
-    bin.install "note"
+    if OS.mac? && Hardware::CPU.intel?
+      system "cargo", "install", *std_cargo_args(path: "crates/note-cli")
+    else
+      bin.install "note"
+    end
   end
 
   test do

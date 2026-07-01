@@ -77,6 +77,10 @@ sudo install note-*/note /usr/local/bin/
 brew install LLawli/tap/note
 ```
 
+On Intel macOS there is no prebuilt binary, so the formula builds from source
+(it pulls in the Rust toolchain automatically); Apple Silicon and Linux install
+the prebuilt binary.
+
 ### Debian / Ubuntu · Fedora / RHEL
 
 Grab the `.deb` or `.rpm` from the release and install it:
